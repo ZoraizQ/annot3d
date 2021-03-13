@@ -1,7 +1,7 @@
 from PySide2.QtUiTools import QUiLoader
 from PySide2.QtCore import QCoreApplication, QEvent, QSize, QMetaObject, Qt, SLOT, Slot
-from PySide2.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap
-from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QHBoxLayout, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
+from PySide2.QtGui import QBitmap, QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap
+from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QGraphicsOpacityEffect, QHBoxLayout, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
 
 
 from traits.api import HasTraits, Instance, on_trait_change, Range
@@ -17,17 +17,17 @@ from AnnotationSpace3D import AnnotationSpace3D
 import random
 import sys
 import matplotlib.pyplot as plt
-from helpers import read_tiff, apply_contrast, apply_brightness
+from helpers import read_tiff, apply_contrast, apply_brightness, disk
 
 
 COLORS = {
     '#ff0000': [255, 0, 0, 255],
     '#35e3e3': [53, 227, 227, 255],
     '#5ebb49': [94, 187, 73, 255],
-    '#ffd035': [255, 208, 53, 255]
+    '#ffd035': [255, 208, 53, 255],
 }
 
-
+ERASER_COLOR_RGBA = [255, 255, 255, 255]
 INIT_COLOR_RGBA = COLORS['#ff0000']
 
 p = 'xy' # xy initially, yz, xz
@@ -39,6 +39,26 @@ brush_size = 5
 eraser_size = 5
 global_contrast = 1
 global_brightness = 15
+global_annot_opacity = 0.8
+
+
+def get_filled_pixmap(pixmap_file):
+    pixmap = QPixmap(pixmap_file)
+    mask = pixmap.createMaskFromColor(QColor('black'), Qt.MaskOutColor)
+    pixmap.fill((QColor('white')))
+    pixmap.setMask(mask)
+    return pixmap
+
+
+def get_circle_cursor(brush_size, color_rgba):
+    x, y = (brush_size*2+1, brush_size*2+1)
+    circle_img = np.zeros((x, y, 4))
+    rr, cc = disk(center=(x//2, y//2), radius=brush_size, shape=(x, y))
+    circle_img[rr, cc] = color_rgba
+    image = np.require(circle_img, np.uint8, 'C')
+    qimg = QImage(image.data, y, x, 4 * y , QImage.Format_RGBA8888)
+    return QCursor(QPixmap(qimg))
+
 
 
 class Visualization(HasTraits):
@@ -111,16 +131,35 @@ class Canvas(QWidget):
         qimg = QImage(image.data, self.dy, self.dx, 4 * self.dy , QImage.Format_RGBA8888)
         self.annot.setPixmap(QPixmap(qimg))
 
+        self.opacity_effect = QGraphicsOpacityEffect() 
+        self.opacity_effect.setOpacity(0.5) 
+        self.annot.setGraphicsEffect(self.opacity_effect)
+
+
         self.l.addWidget(self.bg, 0, 0, Qt.AlignLeft | Qt.AlignTop)
         self.l.addWidget(self.annot, 0, 0, Qt.AlignRight | Qt.AlignBottom)
 
         self.setLayout(self.l)
 
         self.pen_color_rgba = INIT_COLOR_RGBA
+        
+        self.update_cursor()
+
+
+    def update_cursor(self):
+        if eraser_on:
+            self.setCursor(get_circle_cursor(eraser_size, ERASER_COLOR_RGBA))
+        else:
+            self.setCursor(get_circle_cursor(brush_size, self.pen_color_rgba))
+
+
+    def update_annot_opacity(self):
+        self.opacity_effect.setOpacity(global_annot_opacity) 
 
 
     def set_pen_color(self, c):
         self.pen_color_rgba = COLORS[c]
+        self.update_cursor()
 
 
     def mouseMoveEvent(self, e):   
@@ -158,12 +197,7 @@ class Canvas(QWidget):
 
 
 
-def get_filled_pixmap(pixmap_file):
-    pixmap = QPixmap(pixmap_file)
-    mask = pixmap.createMaskFromColor(QColor('black'), Qt.MaskOutColor)
-    pixmap.fill((QColor('white')))
-    pixmap.setMask(mask)
-    return pixmap
+
 
 class MainWindow(QMainWindow):
     c = {'xy': 0, 'xz': 0, 'yz': 0}
@@ -269,10 +303,21 @@ class MainWindow(QMainWindow):
         loadWeightsAction.setStatusTip('Load model weights')
         loadWeightsAction.triggered.connect(self.load_weights_dialog)
 
-        saveAnnotAction = QAction(QIcon(get_filled_pixmap('graphics/save.png')), 'Save', self)
+        saveAnnotAction = QAction(QIcon(get_filled_pixmap('graphics/save.png')), 'Save annotations', self)
         saveAnnotAction.setShortcut(QKeySequence.Save) # Ctrl+S
         saveAnnotAction.setStatusTip('Save annotations file')
         saveAnnotAction.triggered.connect(self.save_annots_dialog)
+
+        exportAction = QAction(QIcon(get_filled_pixmap('graphics/render.png')), 'Export dataset', self)
+        exportAction.setShortcut('Ctrl+E')
+        exportAction.setStatusTip('Export source and annotations as dataset directory')
+        exportAction.triggered.connect(self.export_dialog)
+
+        selectEraserAction = QAction(QIcon(get_filled_pixmap('graphics/eraser.png')), 'Toggle Eraser', self)
+        selectEraserAction.setShortcut('E')
+        selectEraserAction.setStatusTip('Toggle eraser')
+        selectEraserAction.setCheckable(True)
+        selectEraserAction.triggered.connect(self.toggle_eraser)
 
         xyAction = QAction('xy', self)
         xyAction.setShortcut('1')
@@ -330,12 +375,57 @@ class MainWindow(QMainWindow):
         fileMenu.addAction(loadAnnotAction)
         fileMenu.addAction(loadWeightsAction)
         fileMenu.addAction(saveAnnotAction)
+        fileMenu.addAction(exportAction)
         fileMenu.addAction(exitAction)
 
 
+    # SLIDERS
+        self.brightness_slider = QSlider(Qt.Horizontal)
+        self.brightness_slider.setValue(global_brightness)
+        self.brightness_slider.setMinimum(1)
+        self.brightness_slider.setMaximum(30)
+        self.brightness_slider.valueChanged.connect(self.change_brightness)
+
+        self.contrast_slider = QSlider(Qt.Horizontal)
+        self.contrast_slider.setValue(global_contrast)
+        self.contrast_slider.setMinimum(1)
+        self.contrast_slider.setMaximum(15)
+        self.contrast_slider.valueChanged.connect(self.change_contrast)
+
+        self.brush_size_slider = QSlider(Qt.Horizontal)
+        self.brush_size_slider.setValue(brush_size)
+        self.brush_size_slider.setMinimum(1)
+        self.brush_size_slider.setMaximum(15)
+        self.brush_size_slider.valueChanged.connect(self.change_brush_size)
+
+        self.eraser_size_slider = QSlider(Qt.Horizontal)
+        self.eraser_size_slider.setValue(eraser_size)
+        self.eraser_size_slider.setMinimum(1)
+        self.eraser_size_slider.setMaximum(15)
+        self.eraser_size_slider.valueChanged.connect(self.change_eraser_size)
+
+        self.annot_opacity_slider = QSlider(Qt.Horizontal)
+        self.annot_opacity_slider.setValue(global_annot_opacity)
+        self.annot_opacity_slider.setSingleStep(2) # 0.1 * scaled later
+        self.annot_opacity_slider.setMinimum(2)
+        self.annot_opacity_slider.setMaximum(10)
+        self.annot_opacity_slider.valueChanged.connect(self.change_annot_opacity)
+
     # adding toolbar actions
-        self.toolbar = self.addToolBar('Exit')
-        self.toolbar.addActions([xyAction, xzAction, yzAction])
+        self.toolbar = self.addToolBar('Main')
+        self.toolbar.addActions([xyAction, xzAction, yzAction, selectEraserAction])
+        self.toolbar.addSeparator()
+        self.toolbar.setStyleSheet("QToolBar{spacing:10px;}")
+        self.toolbar.addWidget(QLabel('Brightness'))
+        self.toolbar.addWidget(self.brightness_slider)
+        self.toolbar.addWidget(QLabel('Contrast'))
+        self.toolbar.addWidget(self.contrast_slider)
+        self.toolbar.addWidget(QLabel('Brush Size'))
+        self.toolbar.addWidget(self.brush_size_slider)
+        self.toolbar.addWidget(QLabel('Eraser Size'))
+        self.toolbar.addWidget(self.eraser_size_slider)
+        self.toolbar.addWidget(QLabel('Annotation Opacity'))
+        self.toolbar.addWidget(self.annot_opacity_slider)
 
 
     # MAYAVI
@@ -366,12 +456,64 @@ class MainWindow(QMainWindow):
 
 
     def save_annots_dialog(self):
-        fname, _ = QFileDialog.getOpenFileName(self, 'Save annotations file', '.')
+        fname, _ = QFileDialog.getSaveFileName(self, 'Save annotations file', '.')
         global annot3D
         if fname != '':
             annot3D.save(os.path.join(fname))    
 
+
+    def export_dialog(self):
+        fname, _ = QFileDialog.getSaveFileName(self, 'Export dataset directory (src and annot)', '.') # here fname is folder/dir name
+        global annot3D
+        print(fname)
+        if fname != '':
+            annot3D.export(fname, 'xz')
+
+
+    def update_canvas_cursors(self):
+        self.c['xy'].update_cursor()
+        self.c['xz'].update_cursor()
+        self.c['yz'].update_cursor()
+
+
+    def toggle_eraser(self):
+        global eraser_on
+        eraser_on = not eraser_on
+        self.update_canvas_cursors()
+
+
+    def change_brush_size(self):
+        global brush_size 
+        brush_size = self.brush_size_slider.value()
+        self.update_canvas_cursors()
+
+
+    def change_eraser_size(self):
+        global eraser_size 
+        eraser_size = self.eraser_size_slider.value()
+        self.update_canvas_cursors()
+
+
+    def change_annot_opacity(self):
+        global global_annot_opacity 
+        global_annot_opacity = self.annot_opacity_slider.value() * 0.1
+        self.c['xy'].update_annot_opacity()
+        self.c['xz'].update_annot_opacity()
+        self.c['yz'].update_annot_opacity()
+
+
+    def change_brightness(self):
+        global global_brightness
+        global_brightness = self.brightness_slider.value()
+        self.change_gfilter()
+
+
+    def change_contrast(self):
+        global global_contrast
+        global_contrast = self.contrast_slider.value()
+        self.change_gfilter()
     
+
     def switch_plane(self, plane):
         global p, current_slide
         p = plane
@@ -382,7 +524,7 @@ class MainWindow(QMainWindow):
     def render(self):
         self.mayavi_widget.update_annot()
 
-
+    
     # def focus_plane(self, curr_p):
     #     for p in ['xy', 'xz', 'yz']:
     #         if p == curr_p:
@@ -400,7 +542,6 @@ class MainWindow(QMainWindow):
     def predict_slide(self, num_slides=None):
         global annot3D, p, current_slide
 
-        print(pm, num_slides)
         if p == 'xz': # make the model predictions work only for xz plane which it is trained on
             if num_slides is None:
                 annot3D.model_predict(p, current_slide[p])
@@ -412,6 +553,8 @@ class MainWindow(QMainWindow):
 
                     annot3D.model_predict(p, current_slide[p]+i)
                     self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]+i))
+
+
 
 
     def slide_left(self):
@@ -487,10 +630,6 @@ class MainWindow(QMainWindow):
         for p in ['xy', 'xz', 'yz']:
             self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
 
-
-    @Slot()
-    def open():
-        print("Open src")
 
     def set_canvas_pen_color(self, c):
         self.c['xy'].set_pen_color(c)
