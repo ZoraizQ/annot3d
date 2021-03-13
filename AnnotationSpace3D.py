@@ -2,17 +2,15 @@ import numpy as np
 import pickle
 import imageio
 from mayavi import mlab
-import pyvista as pv
-from multiprocessing import Process, freeze_support
-
-from helpers import disk
+from multiprocessing import Process
 from PIL import Image
 import matplotlib.pyplot as plt
 import os 
 import models
-import skimage.io as io
 from tqdm import tqdm
 import zmq
+from helpers import disk
+
 
 target_size_init = (32, 640)
 
@@ -226,25 +224,6 @@ class AnnotationSpace3D():
 				self.npspace[:,curr_slide,:] = npspace_slice
 				self.npspace_rgba[:,curr_slide,:] = npspace_rgba_slice
 
-	def plotPyvistaUniformGrid(self):
-		grid = pv.UniformGrid()
-		grid.dimensions = self.npimages.shape
-		grid.origin = (100, 33, 55.6)  # The bottom left corner of the data set
-		grid.spacing = (1, 1, 1)  # These are the cell sizes along each axis
-		bgimage = self.npimages.flatten(order="F") # flatten
-		segmask = self.npspace.flatten(order="F")
-		grid.point_arrays["values"] = np.where(segmask == 0, bgimage, segmask)
-		grid.plot(text="3D Visualization - UniformGrid", window_size=[400,400])
-
-	def plotPyvistaVolume(self):
-		bgimage = pv.wrap(self.npimages)
-		segmask = pv.wrap(self.npspace)
-		p = pv.Plotter()
-		p.add_volume(bgimage, cmap="viridis")
-		p.add_volume(segmask, cmap="coolwarm")
-		p.link_views()
-		p.show()
-
 	def plotMayaviVolume(self):
 		mlab.figure(figure='3D Visualization')
 		bg_original = mlab.pipeline.volume(mlab.pipeline.scalar_field(self.npimages))
@@ -270,8 +249,6 @@ class AnnotationSpace3D():
 
 	def plot3D(self):
 		# self.plotMayaviVolume()
-		# self.plotPyvistaUniformGrid()
-		# self.plotPyvistaVolume()
 		# guiproc = Process(target=self.plotMayaviVolume)
 		# guiproc.start()
 		np.save('npimages.npy', self.npimages)

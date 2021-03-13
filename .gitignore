@@ -3,9 +3,8 @@ __pycache__
 /.buildozer/*
 /bin
 /bin/*
-extras
 model_weights
 kivy_venv
 exports
 *.npy
-
+extras
