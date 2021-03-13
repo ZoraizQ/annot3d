@@ -1,11 +1,29 @@
 import numpy as np
-from skimage import draw
-from mayavi import mlab
 import pickle
 import imageio
+from mayavi import mlab
+import pyvista as pv
+from multiprocessing import Process, freeze_support
 
+from helpers import disk
+from PIL import Image
+import matplotlib.pyplot as plt
+import os 
+import models
+import skimage.io as io
+from tqdm import tqdm
+import zmq
+
+target_size_init = (32, 640)
+
+def normalize(img): # normalized between 1 and -1
+    min = img.min()
+    max = img.max()
+    x = 2.0 * (img - min) / (max - min) - 1.0
+    return x
 
 class AnnotationSpace3D():
+	
 	def __init__(self, npimages, dimensions, color):
 		self.npimages = npimages
 		self.npspace_rgba = np.zeros((dimensions[0], dimensions[1], dimensions[2], 4), np.uint8)
@@ -13,41 +31,158 @@ class AnnotationSpace3D():
 		self.dim = dimensions # 25,500,500
 		self.MAX_UNDOS = 10
 		self.undo_stack = [] # state history undo type, tuples (plane, npspace slice, npspace rgba slice) (slice of voxels) FOR ALL PLANES
-
 		self.color = color
+		self.model = None
+		self.connection_context = None
+		self.socket = None
 
+	def get_npimages(self):
+		return self.npimages
 
-
+	def get_npspace(self):
+		return self.npspace
 
 	def draw(self, plane, curr_slide, x, y, brush_size, is_brush, color_rgba):
 		if plane == 'xy':
-			rr, cc = draw.disk(center=(y, x), radius=brush_size, shape=(self.dim[1], self.dim[2]))
+			rr, cc = disk(center=(y, x), radius=brush_size, shape=(self.dim[1], self.dim[2]))
 			self.npspace[curr_slide, rr, cc] = is_brush
 			self.npspace_rgba[curr_slide, rr, cc] = color_rgba
 
 
 		elif plane == 'yz':
-			rr, cc = draw.disk(center=(y, x), radius=brush_size, shape=(self.dim[1], self.dim[0]))
+			rr, cc = disk(center=(y, x), radius=brush_size, shape=(self.dim[1], self.dim[0]))
 			self.npspace[:,:,curr_slide][cc, rr] = is_brush
 			self.npspace_rgba[:,:,curr_slide][cc, rr] = color_rgba
 			
 
 		elif plane == 'xz':
-			rr, cc = draw.disk(center=(y, x) , radius=brush_size, shape=(self.dim[0], self.dim[1]))
+			rr, cc = disk(center=(y, x) , radius=brush_size, shape=(self.dim[0], self.dim[1]))
 			self.npspace[:,curr_slide,:][rr, cc] = is_brush
 			self.npspace_rgba[:,curr_slide,:][rr, cc] = color_rgba
+
 
 	def save(self, path):
 		file = open(path, 'wb')
 		pickle.dump(self.npspace_rgba, file)
 		file.close()
 		imageio.mimwrite(path+'.tiff', self.npspace_rgba)
+		
+
+	def exportProcess(self, path, plane):
+		os.mkdir(path) 
+		image_path = os.path.join(path, 'image')
+		label_path = os.path.join(path, 'label')
+		os.mkdir(image_path)
+		os.mkdir(label_path) 
+
+		pindex = 0 # xy
+		if plane == 'xz':
+			pindex = 1
+		elif plane == 'yz':
+			pindex = 2
+		
+		for i in range(self.npimages.shape[pindex]):
+			fname = str(i)+'.png'
+			im = np.array([])
+			if plane == 'xy':
+				im = self.npimages[i]
+			elif plane == 'xz':
+				im = self.npimages[:,i,:]
+			elif plane == 'yz':
+				im = self.npimages[:,:,i]
+				
+			imageio.imwrite(uri=os.path.join(image_path, fname), im=im, format='PNG-PIL')  
+		
+		# 1 -> 0 black, 0 -> 255 white for 3D annotation matrix
+		self.npspace8bit = np.where(self.npspace==0, 255, self.npspace)
+		self.npspace8bit = np.where(self.npspace8bit==1, 0,self.npspace8bit)
+
+		for i in range(self.npimages.shape[pindex]):
+			fname = str(i)+'.png'
+			im = np.array([])
+			if plane == 'xy':
+				im = self.npspace8bit[i]
+			elif plane == 'xz':
+				im = self.npspace8bit[:,i,:]
+			elif plane == 'yz':
+				im = self.npspace8bit[:,:,i]
+
+			label_img = Image.fromarray(im.astype(np.uint8))
+			label_img.save(os.path.join(label_path, fname), "PNG")
+		
+		print("Exported to", path)
+
+
+	def export(self, path, plane): 
+		exportproc = Process(target=self.exportProcess, args=(path, plane,)) # parallel
+		exportproc.start()
+		
+
+	def load_model_weights(self, model_weights_file): # hdf5 file
+		''' load model weights for unet from given file and input size for xz default '''
+		self.model = models.unet(pretrained_weights=model_weights_file, input_size=(32, 640, 1))
+		self.model.summary()
+		print("Model loaded successfully.")
+		
+
+	def model_predict(self, p, cs):
+		from tensorflow import image as tfimage
+
+		if (self.model is not None): # model has been loaded
+			try:
+				img = self.get_src_slice(p, cs)
+				print("Predicting for", p, cs+1)
+				img = normalize(img)
+				img = np.reshape(img,img.shape+(1,))
+				img = tfimage.pad_to_bounding_box(img, 0, 0, target_size_init[0], target_size_init[1])
+				img = np.reshape(img,(1,)+img.shape) # (x,y,1) -> (1,x,y,1)
+
+				np_results = self.model.predict(img, verbose=1)
+				pred = np_results[0]
+				# output = pred[:,:,0]*255
+				pred = pred.reshape(pred.shape[0], pred.shape[1])
+				# print("prediction", pred.shape, np.max(pred), np.min(pred))
+				# print("prediction out", output.shape, np.max(output), np.min(output))
+				# plt.figure()
+				# plt.imshow(output)
+				# plt.show()
+
+				t = 0.8 # thresholding param
+
+				bin_pred = np.copy(pred)
+				bin_pred = np.where(bin_pred < t, 1, 0) # transparent if above threshold else annotation
+				bin_pred = bin_pred[:25, :500]
+
+				rgba_pred = np.stack((bin_pred,)*4, axis=-1)
+				rgba_pred = np.where(rgba_pred == [1,1,1,1], [255,0,0,255], [0,0,0,0]) #color for rgba else transparent
+
+				if p == 'xy':
+					self.npspace[cs] = bin_pred
+					self.npspace_rgba[cs] = rgba_pred
+				elif p == 'yz':
+					self.npspace[:,:,cs] = bin_pred
+					self.npspace_rgba[:,:,cs] = rgba_pred
+				elif p == 'xz':
+					# print(bin_pred.dtype, self.npspace[:,cs,:].dtype, self.npspace.dtype)
+					self.npspace[:,cs,:] = bin_pred
+					self.npspace_rgba[:,cs,:] = rgba_pred
+					# print(bin_pred.dtype, self.npspace[:,cs,:].dtype, self.npspace.dtype)
+
+			except Exception as e:
+				print(e)
+
+		else:
+			print("No model loaded.")
 
 	def load(self, path):
 		file = open(path, 'rb')
 		self.npspace_rgba = pickle.load(file)
 		file.close()
 		self.npspace = np.clip(np.sum(self.npspace_rgba, axis=3), 0, 1) # e.g. [0,0,255,255] sums to 510 then clipped to 1
+
+		# import mcubes
+		# vertices, triangles = mcubes.marching_cubes(self.npspace, 0)
+		# mcubes.export_obj(vertices, triangles, 'annot.obj')
 
 	def mergeload(self, path_list):
 		self.npspace_rgba = np.zeros((self.dim[0], self.dim[1], self.dim[2], 4), np.uint8)
@@ -58,7 +193,8 @@ class AnnotationSpace3D():
 
 		self.npspace_rgba = np.clip(self.npspace_rgba, 0, 255)
 		self.npspace = np.clip(np.sum(self.npspace_rgba, axis=3), 0, 1)
-		
+
+
 	def save_history(self, plane, curr_slide):
 		if (len(self.undo_stack) == self.MAX_UNDOS): # when max undos reached
 			self.undo_stack.pop(0) # head removed, to make room for more at tail
@@ -90,12 +226,58 @@ class AnnotationSpace3D():
 				self.npspace[:,curr_slide,:] = npspace_slice
 				self.npspace_rgba[:,curr_slide,:] = npspace_rgba_slice
 
+	def plotPyvistaUniformGrid(self):
+		grid = pv.UniformGrid()
+		grid.dimensions = self.npimages.shape
+		grid.origin = (100, 33, 55.6)  # The bottom left corner of the data set
+		grid.spacing = (1, 1, 1)  # These are the cell sizes along each axis
+		bgimage = self.npimages.flatten(order="F") # flatten
+		segmask = self.npspace.flatten(order="F")
+		grid.point_arrays["values"] = np.where(segmask == 0, bgimage, segmask)
+		grid.plot(text="3D Visualization - UniformGrid", window_size=[400,400])
 
-	def plot3D(self):
+	def plotPyvistaVolume(self):
+		bgimage = pv.wrap(self.npimages)
+		segmask = pv.wrap(self.npspace)
+		p = pv.Plotter()
+		p.add_volume(bgimage, cmap="viridis")
+		p.add_volume(segmask, cmap="coolwarm")
+		p.link_views()
+		p.show()
+
+	def plotMayaviVolume(self):
 		mlab.figure(figure='3D Visualization')
 		bg_original = mlab.pipeline.volume(mlab.pipeline.scalar_field(self.npimages))
 		segmask = mlab.pipeline.iso_surface(mlab.pipeline.scalar_field(self.npspace), color=(1.0, 0.0, 0.0))
 		mlab.show()
+
+	def trigger_server_render(self):
+		# not_connected = self.connection_context is None or self.socket is None
+
+		# if not not_connected and (self.connection_context.closed == True or self.socket.closed == True):
+		# 	print('Connection closed. Retrying.')
+		# 	self.connection_context.destroy()
+		# 	self.connection_context = None
+		# 	self.socket = None
+
+		# if not_connected:
+		self.connection_context = zmq.Context()
+		self.socket = self.connection_context.socket(zmq.REQ)
+		self.socket.connect("tcp://localhost:5555")
+
+		self.socket.send(b"Render!")
+
+
+	def plot3D(self):
+		# self.plotMayaviVolume()
+		# self.plotPyvistaUniformGrid()
+		# self.plotPyvistaVolume()
+		# guiproc = Process(target=self.plotMayaviVolume)
+		# guiproc.start()
+		np.save('npimages.npy', self.npimages)
+		np.save('npspace.npy', self.npspace)
+		print('Render updated.')
+		self.trigger_server_render()
 		
 
 	def get_npspace(self):
@@ -109,6 +291,14 @@ class AnnotationSpace3D():
 			return self.npspace_rgba[:,cs,:]
 		elif p == 'yz':
 			return np.swapaxes(self.npspace_rgba, 0, 2)[cs]
+
+	def get_src_slice(self, p, cs):
+		if p == 'xy':
+			return self.npimages[cs]
+		elif p == 'xz':
+			return self.npimages[:,cs,:]
+		elif p == 'yz':
+			return np.swapaxes(self.npimages, 0, 2)[cs]
 
 
 	def clear_slice(self, p, cs):
