@@ -1,14 +1,12 @@
 import numpy as np
 import pickle
 import imageio
-from mayavi import mlab
 from multiprocessing import Process
 from PIL import Image
 import matplotlib.pyplot as plt
 import os 
 import models
 from tqdm import tqdm
-import zmq
 from helpers import disk
 
 
@@ -224,38 +222,6 @@ class AnnotationSpace3D():
 				self.npspace[:,curr_slide,:] = npspace_slice
 				self.npspace_rgba[:,curr_slide,:] = npspace_rgba_slice
 
-	def plotMayaviVolume(self):
-		mlab.figure(figure='3D Visualization')
-		bg_original = mlab.pipeline.volume(mlab.pipeline.scalar_field(self.npimages))
-		segmask = mlab.pipeline.iso_surface(mlab.pipeline.scalar_field(self.npspace), color=(1.0, 0.0, 0.0))
-		mlab.show()
-
-	def trigger_server_render(self):
-		# not_connected = self.connection_context is None or self.socket is None
-
-		# if not not_connected and (self.connection_context.closed == True or self.socket.closed == True):
-		# 	print('Connection closed. Retrying.')
-		# 	self.connection_context.destroy()
-		# 	self.connection_context = None
-		# 	self.socket = None
-
-		# if not_connected:
-		self.connection_context = zmq.Context()
-		self.socket = self.connection_context.socket(zmq.REQ)
-		self.socket.connect("tcp://localhost:5555")
-
-		self.socket.send(b"Render!")
-
-
-	def plot3D(self):
-		# self.plotMayaviVolume()
-		# guiproc = Process(target=self.plotMayaviVolume)
-		# guiproc.start()
-		np.save('npimages.npy', self.npimages)
-		np.save('npspace.npy', self.npspace)
-		print('Render updated.')
-		self.trigger_server_render()
-		
 
 	def get_npspace(self):
 		return self.npspace

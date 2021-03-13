@@ -1,12 +1,9 @@
 Keras
 Keras-Preprocessing
-Kivy
 matplotlib
 mayavi
-pyvista
 numpy
 Pillow
 PySide2
-pyzmq
 tensorflow
 tqdm

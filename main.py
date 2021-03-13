@@ -1,315 +1,561 @@
+from PySide2.QtUiTools import QUiLoader
+from PySide2.QtCore import QCoreApplication, QEvent, QSize, QMetaObject, Qt, SLOT, Slot
+from PySide2.QtGui import QBitmap, QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap
+from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QGraphicsOpacityEffect, QHBoxLayout, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
+
+
+from traits.api import HasTraits, Instance, on_trait_change, Range
+from traitsui.api import View, Item
+from mayavi.core.ui.api import MayaviScene, MlabSceneModel, SceneEditor
+from mayavi import mlab
+
 
 import numpy as np
 import os
-from PIL import Image
-
+from PIL import Image, ImageQt
 from AnnotationSpace3D import AnnotationSpace3D
-
-from kivy.app import App
-from kivy.config import Config
-from kivy.core.window import Window
-from kivy.factory import Factory
-from kivy.graphics import Color, Ellipse, Line
-from kivy.graphics.texture import Texture
-from kivy.graphics.vertex_instructions import Rectangle
-from kivy.lang import Builder
-from kivy.properties import StringProperty, NumericProperty, ObjectProperty, BooleanProperty
-from kivy.uix.button import Button
-from kivy.uix.floatlayout import FloatLayout
-from kivy.uix.popup import Popup
-from kivy.uix.screenmanager import Screen, ScreenManager
-from kivy.uix.widget import Widget
+import random
+import sys
+import matplotlib.pyplot as plt
+from helpers import read_tiff, apply_contrast, apply_brightness, disk
 
 
-def read_tiff(path): # returns tiff image stack as np array
-    img = Image.open(path)
-    slides_xy = []
-    slides_xz = []
-    slides_yz = []
+COLORS = {
+    '#ff0000': [255, 0, 0, 255],
+    '#35e3e3': [53, 227, 227, 255],
+    '#5ebb49': [94, 187, 73, 255],
+    '#ffd035': [255, 208, 53, 255],
+}
 
-    for i in range(img.n_frames): #x-y plane
-        img.seek(i)  
-        slides_xy.append(np.array(img))
+ERASER_COLOR_RGBA = [255, 255, 255, 255]
+INIT_COLOR_RGBA = COLORS['#ff0000']
 
-    slides_xy = np.array(slides_xy)
-
-    for npimg in np.swapaxes(slides_xy, 0, 1): # x with z, x-z plane
-        slides_xz.append(npimg)
-
-    for npimg in np.swapaxes(slides_xy, 0, 2): # x with y, y-z plane
-        slides_yz.append(npimg)
-
-    return slides_xy, slides_xz, slides_yz
-
-
-def load_source_file(filename):
-    global slides, npimages, w, h, d, annot3D, plane_data, num_slides, slide_annotations
-
-    slides['xy'], slides['xz'], slides['yz'] = read_tiff(filename)
-    npimages = slides['xy']
-    w = npimages[0].shape[0]
-    h = npimages[0].shape[1]
-    d = npimages.shape[0]
-    annot3D = AnnotationSpace3D(npimages, (d, w, h), color)
-
-    plane_data = {
-        'xy': {'w': w, 'h': h, 'd': d},
-        'xz': {'w': d, 'h': h, 'd': w},
-        'yz': {'w': w, 'h': d, 'd': h}
-    }
-
-    num_slides = plane_data[p]['d']
-
-    slide_annotations = {
-        'xy': [[] for i in range(d)], 
-        'xz': [[] for i in range(w)], 
-        'yz': [[] for i in range(h)]
-    }
-
-
-def apply_contrast(npslice, f):
-    minval = np.percentile(npslice, f) # vary threshold between 1st and 99th percentiles, when f=1
-    maxval = np.percentile(npslice, 100-f)
-    result = np.clip(npslice, minval, maxval)
-    result = ((result - minval) / (maxval - minval)) * 1024
-    return (result).astype(np.short)
-
-
-def apply_brightness(npslice, f):
-    return (npslice*f).astype(np.short)
-
-
-
-w, h, d = 500, 500, 25
 p = 'xy' # xy initially, yz, xz
-slides={}
-plane_data = {}
-slide_annotations = {}
 current_slide = {'xy': 0, 'xz': 0, 'yz': 0}
-num_slides = 0
 annot3D = -1
-npimages = -1
-
-
-color = "#FF0000"
+w, h, d = 500, 500, 25
 eraser_on = False
 brush_size = 5
 eraser_size = 5
 global_contrast = 1
 global_brightness = 15
+global_annot_opacity = 0.8
 
 
-Config.set('graphics', 'width', str(w+d+20*3+110))
-Config.set('graphics', 'height', str(w+d+20*3))
-Config.write()
+def get_filled_pixmap(pixmap_file):
+    pixmap = QPixmap(pixmap_file)
+    mask = pixmap.createMaskFromColor(QColor('black'), Qt.MaskOutColor)
+    pixmap.fill((QColor('white')))
+    pixmap.setMask(mask)
+    return pixmap
+
+
+def get_circle_cursor(brush_size, color_rgba):
+    x, y = (brush_size*2+1, brush_size*2+1)
+    circle_img = np.zeros((x, y, 4))
+    rr, cc = disk(center=(x//2, y//2), radius=brush_size, shape=(x, y))
+    circle_img[rr, cc] = color_rgba
+    image = np.require(circle_img, np.uint8, 'C')
+    qimg = QImage(image.data, y, x, 4 * y , QImage.Format_RGBA8888)
+    return QCursor(QPixmap(qimg))
 
 
 
-class LoadDialog(FloatLayout):
-    load = ObjectProperty(None)
-    cancel = ObjectProperty(None)
+class Visualization(HasTraits):
+    scene = Instance(MlabSceneModel, ())
+
+    @on_trait_change('scene.activated')
+    def update_plot(self):
+        global annot3D
+        npimages = annot3D.get_npimages()
+        npspace = annot3D.get_npspace()
+        self.npspace_sf = mlab.pipeline.scalar_field(npspace) # scalar field to update later
+        bg_original = mlab.pipeline.volume(mlab.pipeline.scalar_field(npimages))
+        segmask = mlab.pipeline.iso_surface(self.npspace_sf, color=(1.0, 0.0, 0.0))
+        # self.scene.scene.disable_render = False
 
 
-class SaveDialog(FloatLayout):
-    save = ObjectProperty(None)
-    text_input = ObjectProperty(None)
-    cancel = ObjectProperty(None)
-
-class ExportDialog(FloatLayout):
-    export = ObjectProperty(None)
-    text_input = ObjectProperty(None)
-    cancel = ObjectProperty(None)
-    plane = StringProperty('xy')
+    def update_annot(self): # update the scalar field and visualization auto updates
+        npspace = annot3D.get_npspace()
+        self.npspace_sf.mlab_source.trait_set(scalars=npspace) 
 
 
-class PCanvas(Widget):
-    dx = NumericProperty(0)
-    dy = NumericProperty(0)
-    gzoomfactor = NumericProperty()
-    bg_tex = ObjectProperty()
-    annot_tex = ObjectProperty()
-    hidden = BooleanProperty(False)
-    init_anchor_x = ''
-    init_anchor_y = ''
-    p = ''
+    view = View(Item('scene', editor=SceneEditor(scene_class=MayaviScene), height=250, width=300, show_label=False), resizable=True )
 
-    def render(self, plane, image):
-        global current_slide, annot3D
+
+
+class MayaviQWidget(QWidget):
+    def __init__(self, parent=None):
+        QWidget.__init__(self, parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0,0,0,0)
+        layout.setSpacing(0)
+        self.visualization = Visualization()
+
+        self.ui = self.visualization.edit_traits(parent=self, kind='subpanel').control
+        layout.addWidget(self.ui)
+        self.ui.setParent(self)
+    
+    def update_annot(self):
+        self.visualization.update_annot()
+
+
+
+class QPaletteButton(QPushButton):
+    def __init__(self, color):
+        super().__init__()
+        self.setFixedSize(QSize(24,24))
+        self.color = color
+        self.setStyleSheet("background-color: %s;" % color)
+
+
+
+class Canvas(QWidget):
+
+    def __init__(self, image, plane):
+        super().__init__()
+        global current_slide, annot3D, COLORS
         self.dx, self.dy = image.shape
-        self.p = plane
+        self.p = plane # plane
 
-        self.init_anchor_x = self.parent.anchor_x
-        self.init_anchor_y = self.parent.anchor_y
+        self.l = QGridLayout()
+        self.bg = QLabel()
+        self.annot = QLabel()
 
-        self.bg_tex = Texture.create(size=(self.dy, self.dx))
-        data = image.tobytes()
-        self.bg_tex.blit_buffer(data, colorfmt='luminance', bufferfmt='short')
+        image = np.require(image, np.short, 'C')   
+        qimg = QImage(image.data, self.dy, self.dx, 2 * self.dy , QImage.Format_Grayscale16)
+        self.bg.setPixmap(QPixmap(qimg))
+
+        image = np.zeros((self.dx, self.dy, 4))
+        image = np.require(image, np.uint8, 'C') 
+        qimg = QImage(image.data, self.dy, self.dx, 4 * self.dy , QImage.Format_RGBA8888)
+        self.annot.setPixmap(QPixmap(qimg))
+
+        self.opacity_effect = QGraphicsOpacityEffect() 
+        self.opacity_effect.setOpacity(0.5) 
+        self.annot.setGraphicsEffect(self.opacity_effect)
 
 
-        self.annot_tex = Texture.create(size=(self.dy, self.dx))
+        self.l.addWidget(self.bg, 0, 0, Qt.AlignLeft | Qt.AlignTop)
+        self.l.addWidget(self.annot, 0, 0, Qt.AlignRight | Qt.AlignBottom)
+
+        self.setLayout(self.l)
+
+        self.pen_color_rgba = INIT_COLOR_RGBA
+        
+        self.update_cursor()
+
+
+    def update_cursor(self):
+        if eraser_on:
+            self.setCursor(get_circle_cursor(eraser_size, ERASER_COLOR_RGBA))
+        else:
+            self.setCursor(get_circle_cursor(brush_size, self.pen_color_rgba))
+
+
+    def update_annot_opacity(self):
+        self.opacity_effect.setOpacity(global_annot_opacity) 
+
+
+    def set_pen_color(self, c):
+        self.pen_color_rgba = COLORS[c]
+        self.update_cursor()
+
+
+    def mouseMoveEvent(self, e):   
+        global current_slide, annot3D    
+        x = e.x()-10
+        y = e.y()-10
+        
         d = current_slide[self.p]
-        empty_data = annot3D.get_slice(self.p, d).tobytes()
-        self.annot_tex.blit_buffer(empty_data, colorfmt='rgba', bufferfmt='ubyte')
-            
+
+        if (eraser_on): 
+            annot3D.draw(self.p, d, x, y, eraser_size, 0, [0,0,0,0])
+        else:
+            annot3D.draw(self.p, d, x, y, brush_size, 1, self.pen_color_rgba)
+
+        self.change_annot(annot3D.get_slice(self.p, d))
+        self.annot.update()
+
+
+    def mousePressEvent(self, e):
+        annot3D.save_history(self.p, current_slide[self.p]) # save history after every line stroke
+        
 
     def change_bg(self, image):
-        data = image.tobytes()
-        self.bg_tex.blit_buffer(data, colorfmt='luminance', bufferfmt='short')
+        image = np.require(image, np.short, 'C')        
+        qimg = QImage(image.data, self.dy, self.dx, 2 * self.dy , QImage.Format_Grayscale16)
+        self.bg.setPixmap(QPixmap(qimg))
+        self.bg.update()
 
 
     def change_annot(self, image):
-        data = image.tobytes()
-        self.annot_tex.blit_buffer(data, colorfmt='rgba', bufferfmt='ubyte')
-        self.canvas.ask_update()
-
-
-    def on_touch_down(self, touch):
-        global annot3D, current_slide, p
-       
-        if self.collide_point(*touch.pos) and self.p == p:
-            annot3D.save_history(self.p, current_slide[self.p]) # save history after every line stroke
-                
-
-    def on_touch_move(self, touch): # PAINT
-        global eraser_on, p, annot3D, current_slide, color, brush_size, eraser_size
-        
-        if self.collide_point(*touch.pos) and self.p == p:
-            x = (touch.x-self.pos[0])/self.gzoomfactor
-            y = (touch.y-self.pos[1])/self.gzoomfactor
-            d = current_slide[self.p]
-
-            if (eraser_on): 
-                annot3D.draw(self.p, d, x, y, eraser_size, 0, [0,0,0,0])
-            else:
-                annot3D.draw(self.p, d, x, y, brush_size, 1, [255, 0, 0, 255])
-
-            self.change_annot(annot3D.get_slice(self.p, d))
-
-
-    def focus(self, focus):
-        if focus:
-            self.parent.anchor_x = 'center'
-            self.parent.anchor_y = 'center'
-        else:
-            self.parent.anchor_x = self.init_anchor_x
-            self.parent.anchor_y = self.init_anchor_y
-
-    def hide(self, hide):
-        self.hidden = hide
-
-    def on_touch_up(self, touch):
-        pass
+        annot = np.require(image, np.uint8, 'C') 
+        qimg = QImage(annot.data, self.dy, self.dx, 4 * self.dy , QImage.Format_RGBA8888)
+        self.annot.setPixmap(QPixmap(qimg))
+        self.annot.update()
 
 
 
 
-class MainScreen(Screen):
+
+class MainWindow(QMainWindow):
     c = {'xy': 0, 'xz': 0, 'yz': 0}
-
-    def __init__(self, **kwargs):
-        super(MainScreen, self).__init__(**kwargs)
-        self._keyboard = Window.request_keyboard(self._keyboard_closed, self)
-        self._keyboard.bind(on_key_down=self._on_keyboard_down)
-
-    def _keyboard_closed(self):
-        self._keyboard.unbind(on_key_down=self._on_keyboard_down)
-        self._keyboard = None
-
-    def _on_keyboard_down(self, keyboard, keycode, text, modifiers):
-        try:
-            if keycode[1] == 'left':
-                self.slide_left()
+    
+    dims = (500, 500, 25) # w, h, d
+    slides={}
+    plane_data = {}
+    slide_annotations = {}
+    num_slides = 0
+    npimages = -1
 
 
-            elif keycode[1] == 'right':
-                self.slide_right()
+    def load_source_file(self, filename):
+        global COLORS, p, current_slide, annot3D
 
-            elif keycode[1] == '1':
-                self.switch_plane('xy')
-                if 'ctrl' in modifiers:
-                    self.focus_plane('xy')
-                else:
-                    self.reset_focus()
+        self.slides['xy'], self.slides['xz'], self.slides['yz'] = read_tiff(filename)
+        self.npimages = self.slides['xy']
+        
+        w = self.npimages[0].shape[0]
+        h = self.npimages[0].shape[1]
+        d = self.npimages.shape[0]
 
-            elif keycode[1] == '2':
-                self.switch_plane('xz')
-                if 'ctrl' in modifiers:
-                    self.focus_plane('xz')
-                else:
-                    self.reset_focus()
+        annot3D = AnnotationSpace3D(self.npimages, (d, w, h), INIT_COLOR_RGBA)
 
-            elif keycode[1] == '3':
-                self.switch_plane('yz')
-                if 'ctrl' in modifiers:
-                    self.focus_plane('yz')
-                else:
-                    self.reset_focus()
+        self.plane_data = {
+            'xy': {'w': w, 'h': h, 'd': d},
+            'xz': {'w': d, 'h': h, 'd': w},
+            'yz': {'w': w, 'h': d, 'd': h}
+        }
 
-            elif keycode[1] == 'r':
-                self.render_volume()
+        self.dims = (w, h, d)
 
-            elif keycode[1] == 'b':
-                self.select_brush()
+        self.num_slides = self.plane_data[p]['d']
 
-            elif keycode[1] == 'e':
-                self.select_eraser()
+        self.slide_annotations = {
+            'xy': [[] for i in range(d)], 
+            'xz': [[] for i in range(w)], 
+            'yz': [[] for i in range(h)]
+        }
 
-            elif keycode[1] == 't':
-                self.predict_slide()
 
-            elif keycode[1] == '5':
-                print("Predicting multiple slides...")
-                self.predict_slide(num_slides=10)
+    def __init__(self):
+        super().__init__()
 
-            elif keycode[1] == '-': # secret hotkey to autoload src
-                self.load_src('', ['data/src.tiff'])
+    # Install an event filter to filter the touch events.
+        # self.installEventFilter(self)
 
-            elif keycode[1] == '=': # secret hotkey to autoload src and annot
-                self.load_annot('', ['data/annot'])
+        
+    # ANNOT LOAD UP
+        self.load_source_file('data/src.tiff')
+
+        for p in ['xy', 'xz', 'yz']:
+            self.c[p] = Canvas(image=self.slides[p][0], plane=p)
             
-            elif keycode[1] == 'w': # secret hotkey to autoload weights
-                self.load_model_weights('', ['model_weights/unet_neurons.hdf5'])
+        self.change_gfilter()
 
-            elif keycode[1] == 'z' and 'ctrl' in modifiers:
-                self.undo()
-            
-            elif keycode[1] == 's' and 'ctrl' in modifiers:
-                self.show_save()
+        w = QWidget()
+        
+        l = QHBoxLayout()
+        w.setLayout(l)
 
-            elif keycode[1] == 'o' and 'ctrl' in modifiers:
-                self.show_load(True)
-            
-            elif keycode[1] == 'l' and 'ctrl' in modifiers:
-                self.show_load()
 
-        except:
-            pass
+    # COLOR PALETTE
+        palette_layout = QGridLayout()
+        i, j = 1, 1
+        for c in COLORS:
+            b = QPaletteButton(c)
+            b.pressed.connect(lambda c=c : self.set_canvas_pen_color(c))
+            palette_layout.addWidget(b, i, j)
+            j += 1
+            if j > 2:
+                j = 1
+                i += 1
 
-        return True
+        l.addLayout(palette_layout)
 
+    # CANVAS LAYOUT
+        canvas_layout = QGridLayout()
+        self.slide_label = QLabel('xy: 1')
+        self.slide_label.setFixedWidth(40)
+        canvas_layout.addWidget(self.slide_label,1,1)
+        canvas_layout.addWidget(self.c['xy'],2,2)
+        canvas_layout.addWidget(self.c['xz'],1,2)
+        canvas_layout.addWidget(self.c['yz'],2,1)
+        l.addLayout(canvas_layout)
+
+    # TOOLBAR, STATUSBAR, MENU
+
+        self.statusBar()
+        
+        exitAction = QAction(QIcon(get_filled_pixmap('graphics/delete.png')), 'Exit', self)
+        exitAction.setShortcut(QKeySequence.Quit) # Ctrl+Q
+        exitAction.setStatusTip('Exit application')
+        exitAction.triggered.connect(self.close)
+
+        loadAnnotAction = QAction(QIcon(get_filled_pixmap('graphics/load.png')), 'Load annotations', self)
+        loadAnnotAction.setShortcut(QKeySequence.Open) # Ctrl+O
+        loadAnnotAction.setStatusTip('Load new annotations file')
+        loadAnnotAction.triggered.connect(self.load_annot_dialog)
+
+        loadWeightsAction = QAction(QIcon(get_filled_pixmap('graphics/merge.png')), 'Load model weights', self)
+        loadWeightsAction.setShortcut('Ctrl+W') # Ctrl+O
+        loadWeightsAction.setStatusTip('Load model weights')
+        loadWeightsAction.triggered.connect(self.load_weights_dialog)
+
+        saveAnnotAction = QAction(QIcon(get_filled_pixmap('graphics/save.png')), 'Save annotations', self)
+        saveAnnotAction.setShortcut(QKeySequence.Save) # Ctrl+S
+        saveAnnotAction.setStatusTip('Save annotations file')
+        saveAnnotAction.triggered.connect(self.save_annots_dialog)
+
+        exportAction = QAction(QIcon(get_filled_pixmap('graphics/render.png')), 'Export dataset', self)
+        exportAction.setShortcut('Ctrl+E')
+        exportAction.setStatusTip('Export source and annotations as dataset directory')
+        exportAction.triggered.connect(self.export_dialog)
+
+        selectEraserAction = QAction(QIcon(get_filled_pixmap('graphics/eraser.png')), 'Toggle Eraser', self)
+        selectEraserAction.setShortcut('E')
+        selectEraserAction.setStatusTip('Toggle eraser')
+        selectEraserAction.setCheckable(True)
+        selectEraserAction.triggered.connect(self.toggle_eraser)
+
+        xyAction = QAction('xy', self)
+        xyAction.setShortcut('1')
+        xyAction.setStatusTip('Switch to xy plane')
+        xyAction.triggered.connect(lambda _: self.switch_plane('xy'))
+
+        xzAction = QAction('xz', self)
+        xzAction.setShortcut('2')
+        xzAction.setStatusTip('Switch to xz plane')
+        xzAction.triggered.connect(lambda _: self.switch_plane('xz'))
+
+        yzAction = QAction('yz', self)
+        yzAction.setShortcut('3')
+        yzAction.setStatusTip('Switch to yz plane')
+        yzAction.triggered.connect(lambda _: self.switch_plane('yz'))
+        
+
+    # HIDDEN HOTKEY ACTIONS
+        slideLeftAction = QAction('Left', self)
+        slideLeftAction.setShortcut('Left')
+        slideLeftAction.setStatusTip('Slide left')
+        slideLeftAction.triggered.connect(self.slide_left)
+
+        slideRightAction = QAction('Right', self)
+        slideRightAction.setShortcut('Right')
+        slideRightAction.setStatusTip('Slide right')
+        slideRightAction.triggered.connect(self.slide_right)
+
+        undoAction = QAction('Undo', self)
+        undoAction.setShortcut(QKeySequence.Undo)
+        undoAction.setStatusTip('Undo last annotation')
+        undoAction.triggered.connect(self.undo)
+
+        renderAction = QAction('Render', self)
+        renderAction.setShortcut('R')
+        renderAction.setStatusTip('Update annotation render')
+        renderAction.triggered.connect(self.render)
+
+        predictAction = QAction('Predict Current', self)
+        predictAction.setShortcut('P')
+        predictAction.setStatusTip('Predict for current slide')
+        predictAction.triggered.connect(lambda x: self.predict_slide())
+
+
+        self.addAction(slideLeftAction)
+        self.addAction(slideRightAction)
+        self.addAction(undoAction)
+        self.addAction(renderAction)
+        self.addAction(predictAction)
+        
+    
+    # adding menubar actions 
+        menubar = self.menuBar()
+        fileMenu = menubar.addMenu('&File')
+        fileMenu.addAction(loadAnnotAction)
+        fileMenu.addAction(loadWeightsAction)
+        fileMenu.addAction(saveAnnotAction)
+        fileMenu.addAction(exportAction)
+        fileMenu.addAction(exitAction)
+
+
+    # SLIDERS
+        self.brightness_slider = QSlider(Qt.Horizontal)
+        self.brightness_slider.setValue(global_brightness)
+        self.brightness_slider.setMinimum(1)
+        self.brightness_slider.setMaximum(30)
+        self.brightness_slider.valueChanged.connect(self.change_brightness)
+
+        self.contrast_slider = QSlider(Qt.Horizontal)
+        self.contrast_slider.setValue(global_contrast)
+        self.contrast_slider.setMinimum(1)
+        self.contrast_slider.setMaximum(15)
+        self.contrast_slider.valueChanged.connect(self.change_contrast)
+
+        self.brush_size_slider = QSlider(Qt.Horizontal)
+        self.brush_size_slider.setValue(brush_size)
+        self.brush_size_slider.setMinimum(1)
+        self.brush_size_slider.setMaximum(15)
+        self.brush_size_slider.valueChanged.connect(self.change_brush_size)
+
+        self.eraser_size_slider = QSlider(Qt.Horizontal)
+        self.eraser_size_slider.setValue(eraser_size)
+        self.eraser_size_slider.setMinimum(1)
+        self.eraser_size_slider.setMaximum(15)
+        self.eraser_size_slider.valueChanged.connect(self.change_eraser_size)
+
+        self.annot_opacity_slider = QSlider(Qt.Horizontal)
+        self.annot_opacity_slider.setValue(global_annot_opacity)
+        self.annot_opacity_slider.setSingleStep(2) # 0.1 * scaled later
+        self.annot_opacity_slider.setMinimum(2)
+        self.annot_opacity_slider.setMaximum(10)
+        self.annot_opacity_slider.valueChanged.connect(self.change_annot_opacity)
+
+    # adding toolbar actions
+        self.toolbar = self.addToolBar('Main')
+        self.toolbar.addActions([xyAction, xzAction, yzAction, selectEraserAction])
+        self.toolbar.addSeparator()
+        self.toolbar.setStyleSheet("QToolBar{spacing:10px;}")
+        self.toolbar.addWidget(QLabel('Brightness'))
+        self.toolbar.addWidget(self.brightness_slider)
+        self.toolbar.addWidget(QLabel('Contrast'))
+        self.toolbar.addWidget(self.contrast_slider)
+        self.toolbar.addWidget(QLabel('Brush Size'))
+        self.toolbar.addWidget(self.brush_size_slider)
+        self.toolbar.addWidget(QLabel('Eraser Size'))
+        self.toolbar.addWidget(self.eraser_size_slider)
+        self.toolbar.addWidget(QLabel('Annotation Opacity'))
+        self.toolbar.addWidget(self.annot_opacity_slider)
+
+
+    # MAYAVI
+        container = QWidget()
+        self.mayavi_widget = MayaviQWidget(container)
+        l.addWidget(self.mayavi_widget)
+        
+        self.setWindowTitle("Annotation Toolbox 3D")
+
+        self.setCentralWidget(w)
+
+
+    def load_annot_dialog(self):
+        fname, _ = QFileDialog.getOpenFileName(self, 'Load annotations file', '.')
+
+        global annot3D, current_slide
+        if fname != '':
+            annot3D.load(fname)
+            for p in ['xy', 'xz', 'yz']:
+                self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
+
+
+    def load_weights_dialog(self):
+        fname, _ = QFileDialog.getOpenFileName(self, 'Load model weights (hfd5)', '.')
+        global annot3D
+        if fname != '':
+            annot3D.load_model_weights(fname)
+
+
+    def save_annots_dialog(self):
+        fname, _ = QFileDialog.getSaveFileName(self, 'Save annotations file', '.')
+        global annot3D
+        if fname != '':
+            annot3D.save(os.path.join(fname))    
+
+
+    def export_dialog(self):
+        fname, _ = QFileDialog.getSaveFileName(self, 'Export dataset directory (src and annot)', '.') # here fname is folder/dir name
+        global annot3D
+        print(fname)
+        if fname != '':
+            annot3D.export(fname, 'xz')
+
+
+    def update_canvas_cursors(self):
+        self.c['xy'].update_cursor()
+        self.c['xz'].update_cursor()
+        self.c['yz'].update_cursor()
+
+
+    def toggle_eraser(self):
+        global eraser_on
+        eraser_on = not eraser_on
+        self.update_canvas_cursors()
+
+
+    def change_brush_size(self):
+        global brush_size 
+        brush_size = self.brush_size_slider.value()
+        self.update_canvas_cursors()
+
+
+    def change_eraser_size(self):
+        global eraser_size 
+        eraser_size = self.eraser_size_slider.value()
+        self.update_canvas_cursors()
+
+
+    def change_annot_opacity(self):
+        global global_annot_opacity 
+        global_annot_opacity = self.annot_opacity_slider.value() * 0.1
+        self.c['xy'].update_annot_opacity()
+        self.c['xz'].update_annot_opacity()
+        self.c['yz'].update_annot_opacity()
+
+
+    def change_brightness(self):
+        global global_brightness
+        global_brightness = self.brightness_slider.value()
+        self.change_gfilter()
+
+
+    def change_contrast(self):
+        global global_contrast
+        global_contrast = self.contrast_slider.value()
+        self.change_gfilter()
+    
 
     def switch_plane(self, plane):
-        global p, num_slides, slides, current_slide
-        
+        global p, current_slide
         p = plane
-        num_slides = plane_data[p]['d']
-        self.ids.current_slide_label.text = p + ': ' + str(current_slide[p]+1)
+        self.num_slides = self.plane_data[p]['d']
         self.change_slide(0)
 
 
-    def focus_plane(self, curr_p):
-        for p in ['xy', 'xz', 'yz']:
-            if p == curr_p:
-                self.c[p].focus(True)
-                self.c[p].hide(False)
-            else:
-                self.c[p].focus(False)
-                self.c[p].hide(True)
+    def render(self):
+        self.mayavi_widget.update_annot()
 
-    def reset_focus(self):
-        for p in ['xy', 'xz', 'yz']:
-            self.c[p].focus(False)
-            self.c[p].hide(False)
+    
+    # def focus_plane(self, curr_p):
+    #     for p in ['xy', 'xz', 'yz']:
+    #         if p == curr_p:
+    #             self.c[p].focus(True)
+    #             self.c[p].hide(False)
+    #         else:
+    #             self.c[p].focus(False)
+    #             self.c[p].hide(True)
+
+    # def reset_focus(self):
+    #     for p in ['xy', 'xz', 'yz']:
+    #         self.c[p].focus(False)
+    #         self.c[p].hide(False)
+
+    def predict_slide(self, num_slides=None):
+        global annot3D, p, current_slide
+
+        if p == 'xz': # make the model predictions work only for xz plane which it is trained on
+            if num_slides is None:
+                annot3D.model_predict(p, current_slide[p])
+                self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
+            else:
+                for i in range(num_slides):
+                    if current_slide[p]+i >= self.w: # does not exceed xz slide range
+                        break
+
+                    annot3D.model_predict(p, current_slide[p]+i)
+                    self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]+i))
+
+
+
 
     def slide_left(self):
         global current_slide, p
@@ -319,7 +565,7 @@ class MainScreen(Screen):
 
     def slide_right(self):
         global current_slide, p
-        if (current_slide[p] < num_slides-1):
+        if (current_slide[p] < self.num_slides-1):
             self.change_slide(1)
 
 
@@ -329,9 +575,9 @@ class MainScreen(Screen):
         current_slide[p] += step
         d = current_slide[p]
 
-        self.ids.current_slide_label.text = p + ': ' + str(d+1)
+        self.slide_label.setText(p + ': ' + str(d+1))
 
-        self.c[p].change_bg(slides[p][d])
+        self.c[p].change_bg(self.slides[p][d])
         self.c[p].change_annot(annot3D.get_slice(p, d))
 
         self.change_gfilter()
@@ -346,32 +592,31 @@ class MainScreen(Screen):
             cs = current_slide[ax]
             
             if (ax == 'xy'):
-                np_slice = npimages[cs]
+                np_slice = self.npimages[cs]
             elif (ax == 'xz'):
-                np_slice = np.swapaxes(npimages, 0, 1)[cs]
+                np_slice = np.swapaxes(self.npimages, 0, 1)[cs]
             elif (ax == 'yz'):
-                np_slice = np.swapaxes(npimages, 0, 2)[cs]
+                np_slice = np.swapaxes(self.npimages, 0, 2)[cs]
 
             np_slice = apply_contrast(np_slice, global_contrast)
             np_slice = apply_brightness(np_slice, global_brightness)
             
             self.c[ax].change_bg(np_slice)
 
-    
+
     def predict_slide(self, num_slides=None):
-        global annot3D, p, current_slide, w, h, d
+        global annot3D, p, current_slide
         if p == 'xz': # make the model predictions work only for xz plane which it is trained on
             if num_slides is None:
                 annot3D.model_predict(p, current_slide[p])
                 self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
             else:
                 for i in range(num_slides):
-                    if current_slide[p]+i >= w: # does not exceed xz slide range
+                    if current_slide[p]+i >= self.w: # does not exceed xz slide range
                         break
 
                     annot3D.model_predict(p, current_slide[p]+i)
                     self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]+i))
-
 
     def clear(self):
         global annot3D, p, current_slide
@@ -380,130 +625,45 @@ class MainScreen(Screen):
 
 
     def undo(self):
-        global annot3D, p, current_slide
+        global annot3D, current_slide
         annot3D.undo_history()
-        self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
-
-    def dismiss_popup(self):
-        self._popup.dismiss()
-
-    def show_load(self, file_type='annot'):
-        dialog = -1
-        title = ""
-        if (file_type == 'src'):
-            dialog = LoadDialog(load=self.load_src, cancel=self.dismiss_popup)
-            title = "Load source TIFF"
-        elif (file_type == 'annot'):
-            dialog = LoadDialog(load=self.load_annot, cancel=self.dismiss_popup)
-            title = "Load annotation file (no extension)"
-        elif (file_type == 'model_weights'): 
-            dialog = LoadDialog(load=self.load_model_weights, cancel=self.dismiss_popup)
-            title = "Load model weights (hdf5)"
-
-        self._popup = Popup(title=title, content=dialog, size_hint=(0.9, 0.9))
-        self._popup.open()
+        for p in ['xy', 'xz', 'yz']:
+            self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
 
 
-    def load_src(self, path, filename):
-        global slides
-        load_source_file(filename[0])
+    def set_canvas_pen_color(self, c):
+        self.c['xy'].set_pen_color(c)
+        self.c['xz'].set_pen_color(c)
+        self.c['yz'].set_pen_color(c)
 
-        self.c['xy'] = self.ids.canvas_xy
-        self.c['xz'] = self.ids.canvas_xz
-        self.c['yz'] = self.ids.canvas_yz
 
-        self.c['xz'].render('xz', slides['xz'][0])
-        self.c['yz'].render('yz', slides['yz'][0])
-        self.c['xy'].render('xy', slides['xy'][0])
         
-        self.change_gfilter()
-        self.dismiss_popup()
 
 
-    def load_annot(self, path, filename):
-        global annot3D, p, current_slide
-        annot3D.load(filename[0])
-        self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
-        self.dismiss_popup()
+if __name__ == "__main__":
+    if not QApplication.instance():
+        app = QApplication(sys.argv)
+    else:
+        app = QApplication.instance()
 
 
-    def load_model_weights(self, path, filename):
-        annot3D.load_model_weights(filename[0])
-        self.dismiss_popup()
+    app.setStyle('Fusion')
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.WindowText, Qt.white)
+    palette.setColor(QPalette.Base, QColor(25, 25, 25))
+    palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(QPalette.ToolTipBase, Qt.black)
+    palette.setColor(QPalette.ToolTipText, Qt.white)
+    palette.setColor(QPalette.Text, Qt.white)
+    palette.setColor(QPalette.Button, QColor(53, 53, 53))
+    palette.setColor(QPalette.ButtonText, Qt.white)
+    palette.setColor(QPalette.BrightText, Qt.red)
+    palette.setColor(QPalette.Link, QColor(42, 130, 218))
+    palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+    palette.setColor(QPalette.HighlightedText, Qt.black)
+    app.setPalette(palette)
 
-
-    def merged_load(self):
-        global annot3D, p, current_slide
-        # annot3D.mergeload(path_list)
-        pass
-
-    def show_save(self):
-        dialog = SaveDialog(save=self.save, cancel=self.dismiss_popup)
-        self._popup = Popup(title="Save annotation file", content=dialog, size_hint=(0.9, 0.9))
-        self._popup.open()
-
-    def save(self, path, filename):
-        global annot3D
-        annot3D.save(os.path.join(path,filename))
-        self.dismiss_popup()
-
-    def show_export(self):
-        dialog = ExportDialog(export=self.export, cancel=self.dismiss_popup)
-        self._popup = Popup(title="Export data directory", content=dialog, size_hint=(0.9, 0.9))
-        self._popup.open()
-
-    def export(self, path, filename, plane):
-        global annot3D
-        annot3D.export(os.path.join(path,filename), plane)
-        self.dismiss_popup()
-
-    def render_volume(self):
-        global annot3D
-        annot3D.plot3D()
-
-    def select_eraser(self):
-        global eraser_on
-        eraser_on = True
-
-    def select_brush(self):
-        global eraser_on
-        eraser_on = False
-    
-    def change_brush_size(self,*args):
-        global brush_size 
-        brush_size = args[1]
-
-    def change_eraser_size(self,*args):
-        global eraser_size 
-        eraser_size = args[1]
-
-    def change_global_brightness(self,*args):
-        global global_brightness 
-        global_brightness = args[1]
-        self.change_gfilter()
-
-    def change_global_contrast(self,*args):
-        global global_contrast 
-        global_contrast = args[1]
-        self.change_gfilter()
-    
-
-class ScreenManagement(ScreenManager):
-    pass
-
-
-
-class AnnotationToolbox3D(App):
-
-    def build(self):
-        self.root = Builder.load_file("toolbox.kv")
-        return self.root
-
-
-Factory.register('LoadDialog', cls=LoadDialog)
-Factory.register('SaveDialog', cls=SaveDialog)
-Factory.register('ExportDialog', cls=ExportDialog)
-
-if __name__ == '__main__':
-    AnnotationToolbox3D().run()
-    
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
