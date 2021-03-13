@@ -20,10 +20,6 @@ import matplotlib.pyplot as plt
 from helpers import read_tiff, apply_contrast, apply_brightness
 
 
-
-SPRAY_PARTICLES = 20
-SPRAY_DIAMETER = 5
-
 COLORS = {
     '#ff0000': [255, 0, 0, 255],
     '#35e3e3': [53, 227, 227, 255],
@@ -143,6 +139,10 @@ class Canvas(QWidget):
         self.annot.update()
 
 
+    def mousePressEvent(self, e):
+        annot3D.save_history(self.p, current_slide[self.p]) # save history after every line stroke
+        
+
     def change_bg(self, image):
         image = np.require(image, np.short, 'C')        
         qimg = QImage(image.data, self.dy, self.dx, 2 * self.dy , QImage.Format_Grayscale16)
@@ -156,10 +156,6 @@ class Canvas(QWidget):
         self.annot.setPixmap(QPixmap(qimg))
         self.annot.update()
 
-
-    def mouseReleaseEvent(self, e):
-        self.last_x = None
-        self.last_y = None
 
 
 def get_filled_pixmap(pixmap_file):
@@ -246,7 +242,7 @@ class MainWindow(QMainWindow):
 
     # CANVAS LAYOUT
         canvas_layout = QGridLayout()
-        self.slide_label = QLabel('xz: 1')
+        self.slide_label = QLabel('xy: 1')
         self.slide_label.setFixedWidth(40)
         canvas_layout.addWidget(self.slide_label,1,1)
         canvas_layout.addWidget(self.c['xy'],2,2)
@@ -263,15 +259,20 @@ class MainWindow(QMainWindow):
         exitAction.setStatusTip('Exit application')
         exitAction.triggered.connect(self.close)
 
-        openSrcAction = QAction(QIcon(get_filled_pixmap('graphics/load.png')), 'Open', self)
-        openSrcAction.setShortcut(QKeySequence.Open) # Ctrl+O
-        openSrcAction.setStatusTip('Open new source file')
-        openSrcAction.triggered.connect(self.showDialog)
+        loadAnnotAction = QAction(QIcon(get_filled_pixmap('graphics/load.png')), 'Load annotations', self)
+        loadAnnotAction.setShortcut(QKeySequence.Open) # Ctrl+O
+        loadAnnotAction.setStatusTip('Load new annotations file')
+        loadAnnotAction.triggered.connect(self.load_annot_dialog)
+
+        loadWeightsAction = QAction(QIcon(get_filled_pixmap('graphics/merge.png')), 'Load model weights', self)
+        loadWeightsAction.setShortcut('Ctrl+W') # Ctrl+O
+        loadWeightsAction.setStatusTip('Load model weights')
+        loadWeightsAction.triggered.connect(self.load_weights_dialog)
 
         saveAnnotAction = QAction(QIcon(get_filled_pixmap('graphics/save.png')), 'Save', self)
         saveAnnotAction.setShortcut(QKeySequence.Save) # Ctrl+S
-        saveAnnotAction.setStatusTip('Save annotations')
-        saveAnnotAction.triggered.connect(self.showDialog)
+        saveAnnotAction.setStatusTip('Save annotations file')
+        saveAnnotAction.triggered.connect(self.save_annots_dialog)
 
         xyAction = QAction('xy', self)
         xyAction.setShortcut('1')
@@ -310,16 +311,24 @@ class MainWindow(QMainWindow):
         renderAction.setStatusTip('Update annotation render')
         renderAction.triggered.connect(self.render)
 
+        predictAction = QAction('Predict Current', self)
+        predictAction.setShortcut('P')
+        predictAction.setStatusTip('Predict for current slide')
+        predictAction.triggered.connect(lambda x: self.predict_slide())
+
+
         self.addAction(slideLeftAction)
         self.addAction(slideRightAction)
         self.addAction(undoAction)
         self.addAction(renderAction)
+        self.addAction(predictAction)
         
     
     # adding menubar actions 
         menubar = self.menuBar()
         fileMenu = menubar.addMenu('&File')
-        fileMenu.addAction(openSrcAction)
+        fileMenu.addAction(loadAnnotAction)
+        fileMenu.addAction(loadWeightsAction)
         fileMenu.addAction(saveAnnotAction)
         fileMenu.addAction(exitAction)
 
@@ -339,10 +348,28 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(w)
 
 
-    def showDialog(self):
-        fname, _ = QFileDialog.getOpenFileName(self, 'Open file', '.')
-        print(fname)
-        # self.load_source_file(fname)
+    def load_annot_dialog(self):
+        fname, _ = QFileDialog.getOpenFileName(self, 'Load annotations file', '.')
+
+        global annot3D, current_slide
+        if fname != '':
+            annot3D.load(fname)
+            for p in ['xy', 'xz', 'yz']:
+                self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
+
+
+    def load_weights_dialog(self):
+        fname, _ = QFileDialog.getOpenFileName(self, 'Load model weights (hfd5)', '.')
+        global annot3D
+        if fname != '':
+            annot3D.load_model_weights(fname)
+
+
+    def save_annots_dialog(self):
+        fname, _ = QFileDialog.getOpenFileName(self, 'Save annotations file', '.')
+        global annot3D
+        if fname != '':
+            annot3D.save(os.path.join(fname))    
 
     
     def switch_plane(self, plane):
@@ -370,8 +397,21 @@ class MainWindow(QMainWindow):
     #         self.c[p].focus(False)
     #         self.c[p].hide(False)
 
+    def predict_slide(self, num_slides=None):
+        global annot3D, p, current_slide
 
-    
+        print(pm, num_slides)
+        if p == 'xz': # make the model predictions work only for xz plane which it is trained on
+            if num_slides is None:
+                annot3D.model_predict(p, current_slide[p])
+                self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
+            else:
+                for i in range(num_slides):
+                    if current_slide[p]+i >= self.w: # does not exceed xz slide range
+                        break
+
+                    annot3D.model_predict(p, current_slide[p]+i)
+                    self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]+i))
 
 
     def slide_left(self):
@@ -442,10 +482,10 @@ class MainWindow(QMainWindow):
 
 
     def undo(self):
-        print('undo')
-        global annot3D, p, current_slide
+        global annot3D, current_slide
         annot3D.undo_history()
-        self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
+        for p in ['xy', 'xz', 'yz']:
+            self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
 
 
     @Slot()
