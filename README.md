@@ -1,6 +1,6 @@
 # 3D Annotation Tool for TIFF volumes
 
-Interactive annotation tool for 3D TIFF volumes with embedded UNET segmentation and active learning for semi-automated and automated annotations for binary-class annotations along with live volume rendering. The tool offers planar views into all cross-sections and establishes correspondences between them while storing a 3D representation of the binary annotation voxel grid.
+Interactive annotation tool for 3D TIFF volumes with integrated UNET semantic segmentation and active learning for semi-automated and automated binary annotations along with embedded live volume rendering. The tool offers planar views into all cross-sections and establishes correspondences between them while storing a 3D representation of the binary annotation voxel grid.
 
 ## Dependencies:
 Install all required dependencies by:
