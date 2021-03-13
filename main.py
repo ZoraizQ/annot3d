@@ -405,7 +405,7 @@ class MainWindow(QMainWindow):
         self.eraser_size_slider.valueChanged.connect(self.change_eraser_size)
 
         self.annot_opacity_slider = QSlider(Qt.Horizontal)
-        self.annot_opacity_slider.setValue(global_annot_opacity)
+        self.annot_opacity_slider.setValue(int(global_annot_opacity*10))
         self.annot_opacity_slider.setSingleStep(2) # 0.1 * scaled later
         self.annot_opacity_slider.setMinimum(2)
         self.annot_opacity_slider.setMaximum(10)
