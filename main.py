@@ -1,7 +1,7 @@
 from PySide2.QtUiTools import QUiLoader
 from PySide2.QtCore import QCoreApplication, QEvent, QSize, QMetaObject, Qt, SLOT, Slot
 from PySide2.QtGui import QBitmap, QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap
-from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QGraphicsOpacityEffect, QHBoxLayout, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
+from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QGraphicsOpacityEffect, QHBoxLayout, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
 
 
 from traits.api import HasTraits, Instance, on_trait_change, Range
@@ -40,7 +40,7 @@ eraser_size = 5
 global_contrast = 1
 global_brightness = 15
 global_annot_opacity = 0.8
-
+global_zoom = 0.0
 
 def get_filled_pixmap(pixmap_file):
     pixmap = QPixmap(pixmap_file)
@@ -119,8 +119,17 @@ class Canvas(QWidget):
         self.p = plane # plane
 
         self.l = QGridLayout()
+
         self.bg = QLabel()
+        # self.bg.setBackgroundRole(QPalette.Base)
+        # self.bg.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        # self.bg.setScaledContents(True)
+
         self.annot = QLabel()
+        # self.annot.setBackgroundRole(QPalette.Base)
+        # self.annot.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        # self.annot.setScaledContents(True)
+
 
         image = np.require(image, np.short, 'C')   
         qimg = QImage(image.data, self.dy, self.dx, 2 * self.dy , QImage.Format_Grayscale16)
@@ -136,9 +145,12 @@ class Canvas(QWidget):
         self.annot.setGraphicsEffect(self.opacity_effect)
 
 
+        # self.bg.resize(self.bg.pixmap().size())
+        # self.annot.resize(self.annot.pixmap().size())
+
         self.l.addWidget(self.bg, 0, 0, Qt.AlignLeft | Qt.AlignTop)
         self.l.addWidget(self.annot, 0, 0, Qt.AlignRight | Qt.AlignBottom)
-
+        
         self.setLayout(self.l)
 
         self.pen_color_rgba = INIT_COLOR_RGBA
@@ -185,14 +197,20 @@ class Canvas(QWidget):
     def change_bg(self, image):
         image = np.require(image, np.short, 'C')        
         qimg = QImage(image.data, self.dy, self.dx, 2 * self.dy , QImage.Format_Grayscale16)
-        self.bg.setPixmap(QPixmap(qimg))
+        qpixmap = QPixmap(qimg)
+        # w = int(self.dx*(1+global_zoom))
+        # h = int(self.dy*(1+global_zoom))
+        # qpixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.bg.setPixmap(qpixmap)
         self.bg.update()
 
 
     def change_annot(self, image):
         annot = np.require(image, np.uint8, 'C') 
         qimg = QImage(annot.data, self.dy, self.dx, 4 * self.dy , QImage.Format_RGBA8888)
-        self.annot.setPixmap(QPixmap(qimg))
+        qpixmap = QPixmap(qimg)
+        # self.annot.resize((1+global_zoom)*self.annot.pixmap().size())
+        self.annot.setPixmap(qpixmap)
         self.annot.update()
 
 
@@ -279,6 +297,26 @@ class MainWindow(QMainWindow):
         self.slide_label = QLabel('xy: 1')
         self.slide_label.setFixedWidth(40)
         canvas_layout.addWidget(self.slide_label,1,1)
+
+        # self.scrollAreaXY = QScrollArea()
+        # self.scrollAreaXY.setBackgroundRole(QPalette.Dark)
+        # self.scrollAreaXY.setWidget(self.c['xy'])
+        # self.scrollAreaXY.setMinimumSize(self.dims[0], self.dims[1])
+
+        # self.scrollAreaXZ = QScrollArea()
+        # self.scrollAreaXZ.setBackgroundRole(QPalette.Dark)
+        # self.scrollAreaXZ.setWidget(self.c['xz'])
+        # self.scrollAreaXZ.setMinimumSize(self.dims[2], self.dims[1])
+
+        # self.scrollAreaYZ = QScrollArea()
+        # self.scrollAreaYZ.setBackgroundRole(QPalette.Dark)
+        # self.scrollAreaYZ.setWidget(self.c['yz'])
+        # self.scrollAreaYZ.setMinimumSize(self.dims[1], self.dims[2])
+
+        # canvas_layout.addWidget(self.scrollAreaXY,2,2)
+        # canvas_layout.addWidget(self.scrollAreaXZ,1,2)
+        # canvas_layout.addWidget(self.scrollAreaYZ,2,1)
+
         canvas_layout.addWidget(self.c['xy'],2,2)
         canvas_layout.addWidget(self.c['xz'],1,2)
         canvas_layout.addWidget(self.c['yz'],2,1)
@@ -411,6 +449,13 @@ class MainWindow(QMainWindow):
         self.annot_opacity_slider.setMaximum(10)
         self.annot_opacity_slider.valueChanged.connect(self.change_annot_opacity)
 
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setValue(int(global_zoom*10))
+        self.zoom_slider.setSingleStep(2) # 0.1 * scaled later
+        self.zoom_slider.setMinimum(0)
+        self.zoom_slider.setMaximum(10)
+        self.zoom_slider.valueChanged.connect(self.change_zoom)
+
     # adding toolbar actions
         self.toolbar = self.addToolBar('Main')
         self.toolbar.addActions([xyAction, xzAction, yzAction, selectEraserAction])
@@ -426,6 +471,9 @@ class MainWindow(QMainWindow):
         self.toolbar.addWidget(self.eraser_size_slider)
         self.toolbar.addWidget(QLabel('Annotation Opacity'))
         self.toolbar.addWidget(self.annot_opacity_slider)
+        # self.toolbar.addWidget(QLabel('Zoom'))
+        # self.toolbar.addWidget(self.zoom_slider)
+
 
 
     # MAYAVI
@@ -434,7 +482,6 @@ class MainWindow(QMainWindow):
         l.addWidget(self.mayavi_widget)
         
         self.setWindowTitle("Annotation Toolbox 3D")
-
         self.setCentralWidget(w)
 
 
@@ -442,7 +489,7 @@ class MainWindow(QMainWindow):
         fname, _ = QFileDialog.getOpenFileName(self, 'Load annotations file', '.')
 
         global annot3D, current_slide
-        if fname != '':
+        if fname:
             annot3D.load(fname)
             for p in ['xy', 'xz', 'yz']:
                 self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
@@ -451,14 +498,14 @@ class MainWindow(QMainWindow):
     def load_weights_dialog(self):
         fname, _ = QFileDialog.getOpenFileName(self, 'Load model weights (hfd5)', '.')
         global annot3D
-        if fname != '':
+        if fname:
             annot3D.load_model_weights(fname)
 
 
     def save_annots_dialog(self):
         fname, _ = QFileDialog.getSaveFileName(self, 'Save annotations file', '.')
         global annot3D
-        if fname != '':
+        if fname:
             annot3D.save(os.path.join(fname))    
 
 
@@ -466,7 +513,7 @@ class MainWindow(QMainWindow):
         fname, _ = QFileDialog.getSaveFileName(self, 'Export dataset directory (src and annot)', '.') # here fname is folder/dir name
         global annot3D
         print(fname)
-        if fname != '':
+        if fname:
             annot3D.export(fname, 'xz')
 
 
@@ -474,6 +521,14 @@ class MainWindow(QMainWindow):
         self.c['xy'].update_cursor()
         self.c['xz'].update_cursor()
         self.c['yz'].update_cursor()
+
+
+    def change_zoom(self):
+        global global_zoom, annot3D
+        global_zoom = self.zoom_slider.value()
+        self.change_gfilter()
+        for p in ['xy', 'xz', 'yz']:
+            self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
 
 
     def toggle_eraser(self):
@@ -586,22 +641,22 @@ class MainWindow(QMainWindow):
     def change_gfilter(self):
         global slides, current_slide, npimages, global_contrast, global_brightness
 
-        for ax in ['xy','xz','yz']:
+        for p in ['xy','xz','yz']:
             # new np slices produced from filter effects
             np_slice = None
-            cs = current_slide[ax]
+            cs = current_slide[p]
             
-            if (ax == 'xy'):
+            if (p == 'xy'):
                 np_slice = self.npimages[cs]
-            elif (ax == 'xz'):
+            elif (p == 'xz'):
                 np_slice = np.swapaxes(self.npimages, 0, 1)[cs]
-            elif (ax == 'yz'):
+            elif (p == 'yz'):
                 np_slice = np.swapaxes(self.npimages, 0, 2)[cs]
 
             np_slice = apply_contrast(np_slice, global_contrast)
             np_slice = apply_brightness(np_slice, global_brightness)
             
-            self.c[ax].change_bg(np_slice)
+            self.c[p].change_bg(np_slice)
 
 
     def predict_slide(self, num_slides=None):
