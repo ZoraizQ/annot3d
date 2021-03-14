@@ -1,6 +1,7 @@
 # 3D Annotation Tool for TIFF volumes
 
 Interactive annotation tool for 3D TIFF volumes with integrated UNET semantic segmentation and active learning for semi-automated and automated binary annotations along with embedded live volume rendering. The tool offers planar views into all cross-sections and establishes correspondences between them while storing a 3D representation of the binary annotation voxel grid.
+![pyside2_gui](graphics/pyside2_gui.jpg)
 
 ## Dependencies:
 Install all required dependencies by:
@@ -26,10 +27,10 @@ python main.py
 
 
 ## History:
-### V0.1 Tkinter GUI
-Implemented with Tkinter initially with popups for maximizing plane views and restricted window sizes along with the first functions.
-![tkinter_gui](graphics/tkinter_gui.jpg)
-
 ### V0.2 Kivy GUI
 Shifted to Kivy for a cross-platform (Desktop/Mobile) and responsive GUI experience with pure python libraries for export via python-for-android and utilization of OpenGL.
 ![kivy_gui](graphics/kivy_gui.jpg)
+
+### V0.1 Tkinter GUI
+Implemented with Tkinter initially with popups for maximizing plane views and restricted window sizes along with the first functions.
+![tkinter_gui](graphics/tkinter_gui.jpg)
