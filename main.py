@@ -1,6 +1,6 @@
 from PySide2.QtUiTools import QUiLoader
 from PySide2.QtCore import QCoreApplication, QEvent, QSize, QMetaObject, Qt, SLOT, Slot
-from PySide2.QtGui import QBitmap, QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap
+from PySide2.QtGui import QBitmap, QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap, QResizeEvent
 from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDockWidget, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QGraphicsOpacityEffect, QHBoxLayout, QInputDialog, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
 
 
@@ -110,6 +110,42 @@ class QPaletteButton(QPushButton):
         self.setStyleSheet("background-color: %s;" % color)
 
 
+class Label(QLabel):
+
+    def __init__(self):
+        super(Label, self).__init__()
+        self.pixmap_width: int = 1
+        self.pixmapHeight: int = 1
+
+    def setPixmap(self, pm: QPixmap) -> None:
+        self.pixmap_width = pm.width()
+        self.pixmapHeight = pm.height()
+
+        self.updateMargins()
+        super(Label, self).setPixmap(pm)
+
+    def resizeEvent(self, a0: QResizeEvent) -> None:
+        self.updateMargins()
+        super(Label, self).resizeEvent(a0)
+
+    def updateMargins(self):
+        if self.pixmap() is None:
+            return
+        pixmapWidth = self.pixmap().width()
+        pixmapHeight = self.pixmap().height()
+        if pixmapWidth <= 0 or pixmapHeight <= 0:
+            return
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+
+        if w * pixmapHeight > h * pixmapWidth:
+            m = int((w - (pixmapWidth * h / pixmapHeight)) / 2)
+            self.setContentsMargins(m, 0, m, 0)
+        else:
+            m = int((h - (pixmapHeight * w / pixmapWidth)) / 2)
+            self.setContentsMargins(0, m, 0, m)
+
 
 class Canvas(QWidget):
 
@@ -122,14 +158,17 @@ class Canvas(QWidget):
         self.l = QGridLayout()
 
         self.bg = QLabel()
-        # self.bg.setBackgroundRole(QPalette.Base)
-        # self.bg.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        # self.bg.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         # self.bg.setScaledContents(True)
+        # self.bg.setMinimumSize(QSize(0,0))
+        # self.bg.setMaximumSize(QSize(16777215, 16777215))
 
         self.annot = QLabel()
-        # self.annot.setBackgroundRole(QPalette.Base)
-        # self.annot.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        # self.annot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         # self.annot.setScaledContents(True)
+        # self.annot.setMinimumSize(QSize(0,0))
+        # self.annot.setMaximumSize(QSize(16777215, 16777215))
+        # self.annot.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
 
 
         image = np.require(image, np.short, 'C')   
@@ -145,12 +184,11 @@ class Canvas(QWidget):
         self.opacity_effect.setOpacity(0.5) 
         self.annot.setGraphicsEffect(self.opacity_effect)
 
-
         # self.bg.resize(self.bg.pixmap().size())
         # self.annot.resize(self.annot.pixmap().size())
 
         self.l.addWidget(self.bg, 0, 0, Qt.AlignLeft | Qt.AlignTop)
-        self.l.addWidget(self.annot, 0, 0, Qt.AlignRight | Qt.AlignBottom)
+        self.l.addWidget(self.annot, 0, 0, Qt.AlignLeft | Qt.AlignTop)
         
         self.setLayout(self.l)
 
@@ -252,9 +290,9 @@ class MainWindow(QMainWindow):
         self.num_slides = self.plane_depth[p]
 
         self.slide_annotations = {
-            'xy': [[] for i in range(d)], 
-            'xz': [[] for i in range(w)], 
-            'yz': [[] for i in range(h)]
+            'xy': [] * d, 
+            'xz': [] * w, 
+            'yz': [] * h
         }
 
 
@@ -281,18 +319,18 @@ class MainWindow(QMainWindow):
 
 
     # COLOR PALETTE
-        palette_layout = QGridLayout()
-        i, j = 1, 1
-        for c in COLORS:
-            b = QPaletteButton(c)
-            b.pressed.connect(lambda c=c : self.set_canvas_pen_color(c))
-            palette_layout.addWidget(b, i, j)
-            j += 1
-            if j > 2:
-                j = 1
-                i += 1
+        # palette_layout = QGridLayout()
+        # i, j = 1, 1
+        # for c in COLORS:
+        #     b = QPaletteButton(c)
+        #     b.pressed.connect(lambda c=c : self.set_canvas_pen_color(c))
+        #     palette_layout.addWidget(b, i, j)
+        #     j += 1
+        #     if j > 2:
+        #         j = 1
+        #         i += 1
 
-        l.addLayout(palette_layout)
+        # l.addLayout(palette_layout)
 
     # CANVAS LAYOUT
         canvas_layout = QGridLayout()
@@ -301,23 +339,23 @@ class MainWindow(QMainWindow):
         canvas_layout.addWidget(self.slide_label,1,1)
 
         # self.scrollAreaXY = QScrollArea()
-        # self.scrollAreaXY.setBackgroundRole(QPalette.Dark)
         # self.scrollAreaXY.setWidget(self.c['xy'])
+        # self.scrollAreaXY.setWidgetResizable(True)
         # self.scrollAreaXY.setMinimumSize(self.dims[0], self.dims[1])
 
         # self.scrollAreaXZ = QScrollArea()
-        # self.scrollAreaXZ.setBackgroundRole(QPalette.Dark)
         # self.scrollAreaXZ.setWidget(self.c['xz'])
+        # self.scrollAreaXZ.setWidgetResizable(True)
         # self.scrollAreaXZ.setMinimumSize(self.dims[2], self.dims[1])
 
         # self.scrollAreaYZ = QScrollArea()
-        # self.scrollAreaYZ.setBackgroundRole(QPalette.Dark)
         # self.scrollAreaYZ.setWidget(self.c['yz'])
+        # self.scrollAreaYZ.setWidgetResizable(True)
         # self.scrollAreaYZ.setMinimumSize(self.dims[1], self.dims[2])
 
-        # canvas_layout.addWidget(self.scrollAreaXY,2,2)
-        # canvas_layout.addWidget(self.scrollAreaXZ,1,2)
-        # canvas_layout.addWidget(self.scrollAreaYZ,2,1)
+        # canvas_layout.addWidget(self.scrollAreaXY,2,2, stretch=1)
+        # canvas_layout.addWidget(self.scrollAreaXZ,1,2, stretch=0)
+        # canvas_layout.addWidget(self.scrollAreaYZ,2,1, stretch=0)
 
         canvas_layout.addWidget(self.c['xy'],2,2)
         canvas_layout.addWidget(self.c['xz'],1,2)
@@ -331,13 +369,13 @@ class MainWindow(QMainWindow):
         self.setup_sliders()
 
     # MAYAVI RENDER VIEW
-        dock = QDockWidget("Render View", self)
-        dock.setFeatures(dock.features() & ~QDockWidget.DockWidgetClosable) # unclosable
-        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        container = QWidget(dock)
+        self.rdock = QDockWidget("Render View", self) # render dock
+        self.rdock.setFeatures(self.rdock.features() & ~QDockWidget.DockWidgetClosable) # unclosable
+        self.rdock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        container = QWidget(self.rdock)
         self.mayavi_widget = MayaviQWidget(container)
-        dock.setWidget(self.mayavi_widget)
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self.rdock.setWidget(self.mayavi_widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.rdock)
     
     # GENERAL WINDOW PROPS
         self.setWindowTitle("Annotation Toolbox 3D")
@@ -357,8 +395,13 @@ class MainWindow(QMainWindow):
         loadAnnotAction.setStatusTip('Load new annotations file')
         loadAnnotAction.triggered.connect(self.load_annot_dialog)
 
+        mergeAnnotAction = QAction(QIcon(get_filled_pixmap('graphics/load.png')), 'Merge annotations', self)
+        mergeAnnotAction.setShortcut('Ctrl+M')
+        mergeAnnotAction.setStatusTip('Merge multiple annotations')
+        mergeAnnotAction.triggered.connect(self.merge_annot_dialog)
+
         loadWeightsAction = QAction(QIcon(get_filled_pixmap('graphics/merge.png')), 'Load model weights', self)
-        loadWeightsAction.setShortcut('Ctrl+W') # Ctrl+O
+        loadWeightsAction.setShortcut('Ctrl+W')
         loadWeightsAction.setStatusTip('Load model weights')
         loadWeightsAction.triggered.connect(self.load_weights_dialog)
 
@@ -445,8 +488,9 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
         fileMenu = menubar.addMenu('&File')
         fileMenu.addAction(loadAnnotAction)
-        fileMenu.addAction(loadWeightsAction)
         fileMenu.addAction(saveAnnotAction)
+        fileMenu.addAction(mergeAnnotAction)
+        fileMenu.addAction(loadWeightsAction)
         fileMenu.addAction(exportAction)
         fileMenu.addAction(exitAction)
 
@@ -520,6 +564,14 @@ class MainWindow(QMainWindow):
             annot3D.load(fname)
             for p in ['xy', 'xz', 'yz']:
                 self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
+
+    
+    def merge_annot_dialog(self):
+        fnames_list, _ = QFileDialog.getOpenFileNames(self, 'Select multiple annotation files to merge and load', '.')
+
+        global annot3D, current_slide
+        if len(fnames_list) > 0:
+            annot3D.mergeload(fnames_list)
 
 
     def load_weights_dialog(self):
