@@ -1,7 +1,7 @@
 from PySide2.QtUiTools import QUiLoader
 from PySide2.QtCore import QCoreApplication, QEvent, QSize, QMetaObject, Qt, SLOT, Slot
 from PySide2.QtGui import QBitmap, QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap
-from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QGraphicsOpacityEffect, QHBoxLayout, QInputDialog, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
+from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDockWidget, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QGraphicsOpacityEffect, QHBoxLayout, QInputDialog, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
 
 
 from traits.api import HasTraits, Instance, on_trait_change, Range
@@ -330,11 +330,14 @@ class MainWindow(QMainWindow):
     # SLIDERS
         self.setup_sliders()
 
-
-    # MAYAVI
-        container = QWidget()
+    # MAYAVI RENDER VIEW
+        dock = QDockWidget("Render View", self)
+        dock.setFeatures(dock.features() & ~QDockWidget.DockWidgetClosable) # unclosable
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        container = QWidget(dock)
         self.mayavi_widget = MayaviQWidget(container)
-        l.addWidget(self.mayavi_widget)
+        dock.setWidget(self.mayavi_widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
     
     # GENERAL WINDOW PROPS
         self.setWindowTitle("Annotation Toolbox 3D")
