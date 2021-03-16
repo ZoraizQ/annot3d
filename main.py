@@ -1,7 +1,7 @@
 from PySide2.QtUiTools import QUiLoader
 from PySide2.QtCore import QCoreApplication, QEvent, QSize, QMetaObject, Qt, SLOT, Slot
 from PySide2.QtGui import QBitmap, QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap
-from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QGraphicsOpacityEffect, QHBoxLayout, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
+from PySide2.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDial, QDoubleSpinBox, QFileDialog, QFontComboBox, QGraphicsGridLayout, QGraphicsOpacityEffect, QHBoxLayout, QInputDialog, QLCDNumber, QLabel, QLineEdit, QMainWindow, QMenu, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStatusBar, QTimeEdit, QToolBar, QGridLayout, QVBoxLayout, QWidget, QAction, QShortcut
 
 
 from traits.api import HasTraits, Instance, on_trait_change, Range
@@ -18,6 +18,7 @@ import random
 import sys
 import matplotlib.pyplot as plt
 from helpers import read_tiff, apply_contrast, apply_brightness, disk
+import asyncio
 
 
 COLORS = {
@@ -222,7 +223,7 @@ class MainWindow(QMainWindow):
     
     dims = (500, 500, 25) # w, h, d
     slides={}
-    plane_data = {}
+    plane_depth = {}
     slide_annotations = {}
     num_slides = 0
     npimages = -1
@@ -240,15 +241,15 @@ class MainWindow(QMainWindow):
 
         annot3D = AnnotationSpace3D(self.npimages, (d, w, h), INIT_COLOR_RGBA)
 
-        self.plane_data = {
-            'xy': {'w': w, 'h': h, 'd': d},
-            'xz': {'w': d, 'h': h, 'd': w},
-            'yz': {'w': w, 'h': d, 'd': h}
+        self.plane_depth = {
+            'xy': d,
+            'xz': w,
+            'yz': h
         }
 
         self.dims = (w, h, d)
 
-        self.num_slides = self.plane_data[p]['d']
+        self.num_slides = self.plane_depth[p]
 
         self.slide_annotations = {
             'xy': [[] for i in range(d)], 
@@ -259,13 +260,14 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-
-    # Install an event filter to filter the touch events.
-        # self.installEventFilter(self)
-
         
-    # ANNOT LOAD UP
+    # INIT ANNOT LOAD UP
         self.load_source_file('data/src.tiff')
+
+        if len(sys.argv) == 2:
+            global annot3D
+            print("Set server URL to", sys.argv[1])
+            annot3D.set_server_url(sys.argv[1])
 
         for p in ['xy', 'xz', 'yz']:
             self.c[p] = Canvas(image=self.slides[p][0], plane=p)
@@ -323,7 +325,23 @@ class MainWindow(QMainWindow):
         l.addLayout(canvas_layout)
 
     # TOOLBAR, STATUSBAR, MENU
+        self.setup_bar_actions()
 
+    # SLIDERS
+        self.setup_sliders()
+
+
+    # MAYAVI
+        container = QWidget()
+        self.mayavi_widget = MayaviQWidget(container)
+        l.addWidget(self.mayavi_widget)
+    
+    # GENERAL WINDOW PROPS
+        self.setWindowTitle("Annotation Toolbox 3D")
+        self.setCentralWidget(w)
+
+
+    def setup_bar_actions(self):
         self.statusBar()
         
         exitAction = QAction(QIcon(get_filled_pixmap('graphics/delete.png')), 'Exit', self)
@@ -357,20 +375,28 @@ class MainWindow(QMainWindow):
         selectEraserAction.setCheckable(True)
         selectEraserAction.triggered.connect(self.toggle_eraser)
 
-        xyAction = QAction('xy', self)
-        xyAction.setShortcut('1')
-        xyAction.setStatusTip('Switch to xy plane')
-        xyAction.triggered.connect(lambda _: self.switch_plane('xy'))
+        self.xyAction = QAction('xy', self)
+        self.xyAction.setShortcut('1')
+        self.xyAction.setStatusTip('Switch to xy plane')
+        self.xyAction.setCheckable(True)
+        self.xyAction.triggered.connect(lambda: self.switch_plane('xy'))
 
-        xzAction = QAction('xz', self)
-        xzAction.setShortcut('2')
-        xzAction.setStatusTip('Switch to xz plane')
-        xzAction.triggered.connect(lambda _: self.switch_plane('xz'))
+        self.xzAction = QAction('xz', self)
+        self.xzAction.setShortcut('2')
+        self.xzAction.setStatusTip('Switch to xz plane')
+        self.xzAction.setCheckable(True)
+        self.xzAction.triggered.connect(lambda: self.switch_plane('xz'))
 
-        yzAction = QAction('yz', self)
-        yzAction.setShortcut('3')
-        yzAction.setStatusTip('Switch to yz plane')
-        yzAction.triggered.connect(lambda _: self.switch_plane('yz'))
+        self.yzAction = QAction('yz', self)
+        self.yzAction.setShortcut('3')
+        self.yzAction.setStatusTip('Switch to yz plane')
+        self.yzAction.setCheckable(True)
+        self.yzAction.triggered.connect(lambda: self.switch_plane('yz'))
+
+        gotoAction = QAction('goto', self)
+        gotoAction.setShortcut(QKeySequence.Find)
+        gotoAction.setStatusTip('Go to specific slide on selected plane')
+        gotoAction.triggered.connect(self.goto_slide)
         
 
     # HIDDEN HOTKEY ACTIONS
@@ -397,14 +423,19 @@ class MainWindow(QMainWindow):
         predictAction = QAction('Predict Current', self)
         predictAction.setShortcut('P')
         predictAction.setStatusTip('Predict for current slide')
-        predictAction.triggered.connect(lambda x: self.predict_slide())
+        predictAction.triggered.connect(lambda: self.predict_slide(num_slides=None))
 
+        predict5Action = QAction('Predict Current', self)
+        predict5Action.setShortcut('Ctrl+P')
+        predict5Action.setStatusTip('Predict for current 5 slides')
+        predict5Action.triggered.connect(lambda: self.predict_slide(num_slides=5))
 
         self.addAction(slideLeftAction)
         self.addAction(slideRightAction)
         self.addAction(undoAction)
         self.addAction(renderAction)
         self.addAction(predictAction)
+        self.addAction(predict5Action)
         
     
     # adding menubar actions 
@@ -416,8 +447,14 @@ class MainWindow(QMainWindow):
         fileMenu.addAction(exportAction)
         fileMenu.addAction(exitAction)
 
+    # adding toolbar actions
+        self.toolbar = self.addToolBar('Main')
+        self.toolbar.addActions([self.xyAction, self.xzAction, self.yzAction, gotoAction, selectEraserAction])
 
-    # SLIDERS
+
+
+    def setup_sliders(self):
+        # create
         self.brightness_slider = QSlider(Qt.Horizontal)
         self.brightness_slider.setValue(global_brightness)
         self.brightness_slider.setMinimum(1)
@@ -456,9 +493,7 @@ class MainWindow(QMainWindow):
         self.zoom_slider.setMaximum(10)
         self.zoom_slider.valueChanged.connect(self.change_zoom)
 
-    # adding toolbar actions
-        self.toolbar = self.addToolBar('Main')
-        self.toolbar.addActions([xyAction, xzAction, yzAction, selectEraserAction])
+        # add to toolbar
         self.toolbar.addSeparator()
         self.toolbar.setStyleSheet("QToolBar{spacing:10px;}")
         self.toolbar.addWidget(QLabel('Brightness'))
@@ -473,17 +508,6 @@ class MainWindow(QMainWindow):
         self.toolbar.addWidget(self.annot_opacity_slider)
         # self.toolbar.addWidget(QLabel('Zoom'))
         # self.toolbar.addWidget(self.zoom_slider)
-
-
-
-    # MAYAVI
-        container = QWidget()
-        self.mayavi_widget = MayaviQWidget(container)
-        l.addWidget(self.mayavi_widget)
-        
-        self.setWindowTitle("Annotation Toolbox 3D")
-        self.setCentralWidget(w)
-
 
     def load_annot_dialog(self):
         fname, _ = QFileDialog.getOpenFileName(self, 'Load annotations file', '.')
@@ -515,6 +539,23 @@ class MainWindow(QMainWindow):
         print(fname)
         if fname:
             annot3D.export(fname, 'xz')
+
+    def goto_slide(self):
+        global p, annot3D
+
+        cs, ok = QInputDialog.getText(self, "Go to slide", "Go to slide on plane "+p)
+        if ok and cs.isnumeric(): # current slide cs must be a number
+            cs = int(cs)-1
+            if cs < 0 or cs >= self.plane_depth[p]: # slide out of range
+                return
+
+            current_slide[p] = cs
+            self.slide_label.setText(p + ': ' + str(cs+1))
+
+            self.c[p].change_bg(self.slides[p][cs])
+            self.c[p].change_annot(annot3D.get_slice(p, cs))
+
+            self.change_gfilter()
 
 
     def update_canvas_cursors(self):
@@ -572,8 +613,19 @@ class MainWindow(QMainWindow):
     def switch_plane(self, plane):
         global p, current_slide
         p = plane
-        self.num_slides = self.plane_data[p]['d']
+        if p == 'xy':
+            self.xzAction.setChecked(False)
+            self.yzAction.setChecked(False)
+        elif p == 'xz':
+            self.xyAction.setChecked(False)
+            self.yzAction.setChecked(False)
+        elif p == 'yz':
+            self.xyAction.setChecked(False)
+            self.xzAction.setChecked(False)
+        
+        self.num_slides = self.plane_depth[p]
         self.change_slide(0)
+        
 
 
     def render(self):
@@ -594,22 +646,20 @@ class MainWindow(QMainWindow):
     #         self.c[p].focus(False)
     #         self.c[p].hide(False)
 
+
     def predict_slide(self, num_slides=None):
         global annot3D, p, current_slide
 
-        if p == 'xz': # make the model predictions work only for xz plane which it is trained on
-            if num_slides is None:
-                annot3D.model_predict(p, current_slide[p])
-                self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
-            else:
-                for i in range(num_slides):
-                    if current_slide[p]+i >= self.w: # does not exceed xz slide range
-                        break
+        if p == 'xz': # model predictions work only for the plane it is trained on
+            if num_slides is None: # not specified
+                num_slides = 1
 
-                    annot3D.model_predict(p, current_slide[p]+i)
-                    self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]+i))
+            for i in range(num_slides):
+                if current_slide[p]+i >= self.dims[0]: # does not exceed slide range
+                    break
 
-
+                annot3D.model_predict(p, current_slide[p]+i)
+                self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]+i))
 
 
     def slide_left(self):
@@ -628,12 +678,12 @@ class MainWindow(QMainWindow):
         global current_slide, p, annot3D, slides
         
         current_slide[p] += step
-        d = current_slide[p]
+        cs = current_slide[p]
 
-        self.slide_label.setText(p + ': ' + str(d+1))
+        self.slide_label.setText(p + ': ' + str(cs+1))
 
-        self.c[p].change_bg(self.slides[p][d])
-        self.c[p].change_annot(annot3D.get_slice(p, d))
+        self.c[p].change_bg(self.slides[p][cs])
+        self.c[p].change_annot(annot3D.get_slice(p, cs))
 
         self.change_gfilter()
 
@@ -658,20 +708,6 @@ class MainWindow(QMainWindow):
             
             self.c[p].change_bg(np_slice)
 
-
-    def predict_slide(self, num_slides=None):
-        global annot3D, p, current_slide
-        if p == 'xz': # make the model predictions work only for xz plane which it is trained on
-            if num_slides is None:
-                annot3D.model_predict(p, current_slide[p])
-                self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]))
-            else:
-                for i in range(num_slides):
-                    if current_slide[p]+i >= self.w: # does not exceed xz slide range
-                        break
-
-                    annot3D.model_predict(p, current_slide[p]+i)
-                    self.c[p].change_annot(annot3D.get_slice(p, current_slide[p]+i))
 
     def clear(self):
         global annot3D, p, current_slide

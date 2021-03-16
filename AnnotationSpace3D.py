@@ -8,7 +8,7 @@ import os
 import models
 from tqdm import tqdm
 from helpers import disk
-
+import asyncio
 
 target_size_init = (32, 640)
 
@@ -20,14 +20,16 @@ def normalize(img): # normalized between 1 and -1
 
 class AnnotationSpace3D():
 	
-	def __init__(self, npimages, dimensions, color):
+	def __init__(self, npimages, dimensions, color_rgba):
 		self.npimages = npimages
 		self.npspace_rgba = np.zeros((dimensions[0], dimensions[1], dimensions[2], 4), np.uint8)
 		self.npspace = np.zeros(dimensions, dtype=np.uint8)
 		self.dim = dimensions # 25,500,500
 		self.MAX_UNDOS = 10
 		self.undo_stack = [] # state history undo type, tuples (plane, npspace slice, npspace rgba slice) (slice of voxels) FOR ALL PLANES
-		self.color = color
+		self.color_rgba = color_rgba
+		self.server_url = ''
+		self.predict_mode = 'local'
 		self.model = None
 		self.connection_context = None
 		self.socket = None
@@ -121,13 +123,58 @@ class AnnotationSpace3D():
 		print("Model loaded successfully.")
 		
 
-	def model_predict(self, p, cs):
-		from tensorflow import image as tfimage
+	def set_server_url(self, url):
+		self.server_url = url
+		self.predict_mode = 'server'
 
-		if (self.model is not None): # model has been loaded
+
+	def model_predict(self, p, cs):
+		img = self.get_src_slice(p, cs)
+		print("Predicting for", p, cs+1,"from",self.predict_mode)
+
+		if self.predict_mode == 'server':
+			import requests
+			import json
+			
+			url = self.server_url
+			api = "/predict_model"
+			url += api
+
+			data = {'slide': img.tolist()}
+
+			response = requests.post(url, json=data)
+			print(response)
+
+			if response.status_code == 200:
+				bin_pred = json.loads(response.content)['prediction']
+				bin_pred = np.array(bin_pred)
+				print(bin_pred.shape)
+
+				rgba_pred = np.stack((bin_pred,)*4, axis=-1)
+				rgba_pred = np.where(rgba_pred == [1,1,1,1], self.color_rgba, [0,0,0,0]) #color for rgba else transparent
+
+				if p == 'xy':
+					self.npspace[cs] = bin_pred
+					self.npspace_rgba[cs] = rgba_pred
+				elif p == 'yz':
+					self.npspace[:,:,cs] = bin_pred
+					self.npspace_rgba[:,:,cs] = rgba_pred
+				elif p == 'xz':
+					self.npspace[:,cs,:] = bin_pred
+					self.npspace_rgba[:,cs,:] = rgba_pred
+			else:
+				print('Predict API call failed.', response)
+
+
+		elif self.predict_mode == 'local':
+
+			if (self.model is None): # model has not been loaded
+				print("No model loaded for local predictions.")
+				return
+
 			try:
-				img = self.get_src_slice(p, cs)
-				print("Predicting for", p, cs+1)
+				from tensorflow import image as tfimage
+
 				img = normalize(img)
 				img = np.reshape(img,img.shape+(1,))
 				img = tfimage.pad_to_bounding_box(img, 0, 0, target_size_init[0], target_size_init[1])
@@ -166,9 +213,7 @@ class AnnotationSpace3D():
 
 			except Exception as e:
 				print(e)
-
-		else:
-			print("No model loaded.")
+			
 
 	def load(self, path):
 		file = open(path, 'rb')
